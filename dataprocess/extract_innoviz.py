@@ -74,6 +74,15 @@ DEFAULT_BOX_PAD = 1.1
 MIN_POINTS_IN_BOX = 5
 DEFAULT_Z_FLOOR: Optional[float] = None  # supplemental ground cutoff disabled by default
 AUTO_HEIGHT_PERCENTILE = 5.0           # robust estimator: sensor-frame ground ≈ p5(Z)
+# Below STATIC_DISP_EPS (m) we treat a 1-frame box motion as zero — both because
+# numerical noise in T1 @ T0^-1 can produce ~1e-14 m fake flow, and because
+# annotation jitter rarely encodes meaningful sub-cm motion. CVAT's `is_static`
+# attribute, when present, takes precedence regardless of magnitude.
+STATIC_DISP_EPS = 0.01
+# Above MAX_PLAUSIBLE_DISP (m / frame) we treat the box pair as an annotation
+# glitch (e.g. observed 17 m teleport in sprint). At 10 Hz this caps speed at
+# 30 m/s ≈ 108 km/h, well above any plausible pedestrian/vehicle in our data.
+MAX_PLAUSIBLE_DISP = 3.0
 
 IDENTITY_4 = np.eye(4, dtype=np.float32)
 
@@ -116,6 +125,7 @@ class BoxAnnotation:
     rotation: np.ndarray  # (3,) float64, Euler XYZ radians (CVAT convention)
     scale: np.ndarray     # (3,) float64, full extents (w, l, h)
     category_index: int   # mapped via INNOVIZ_CATEGORY_TO_INDEX
+    is_static: bool       # CVAT attribute; True = parked / non-moving object
 
 
 def _scene_id_for(day: str, seq: str) -> str:
@@ -180,6 +190,7 @@ def _parse_annotations(
                 rotation=np.asarray(ann["rotation"], dtype=np.float64),
                 scale=np.asarray(ann["scale"], dtype=np.float64),
                 category_index=category_index(canon),
+                is_static=bool(ann["attributes"].get("is_static", False)),
             )
     return tracks, max_frame
 
@@ -242,7 +253,6 @@ def _per_point_flow(
             continue
 
         T0 = _build_box_pose(box0.position, box0.rotation)
-        T1 = _build_box_pose(box1.position, box1.rotation)
         T0_inv = _se3_inverse(T0)
 
         # Test interior points in box-local frame at t0 with the standard 1.1x padding.
@@ -252,14 +262,34 @@ def _per_point_flow(
         if not inside.any():
             continue
 
+        # Always label the class for interior points, even when the object is
+        # static or the box pair is rejected for flow purposes — this matches
+        # extract_nus.py's behaviour and lets DeltaFlow learn "object → 0 flow".
+        classes[inside] = box0.category_index
+
         n_inside = int(inside.sum())
         if n_inside < MIN_POINTS_IN_BOX:
             # Too few points to compute a reliable rigid-body flow; mark invalid.
             valid[inside] = False
-            classes[inside] = box0.category_index
+            continue
+
+        # Skip flow computation for objects tagged static by the annotator, or
+        # for box pairs with implausible motion (annotation glitches), or with
+        # sub-cm displacement (numerical/jitter noise). Flow stays at zero and
+        # the instance_id is *not* set — matching what nuScenes/AV2 produce for
+        # parked vehicles and what offline_viewer.py uses to decide overlay
+        # membership (has_flow = instance_id > 0).
+        centroid_disp = float(np.linalg.norm(box1.position - box0.position))
+        if (
+            box0.is_static
+            or box1.is_static
+            or centroid_disp < STATIC_DISP_EPS
+            or centroid_disp > MAX_PLAUSIBLE_DISP
+        ):
             continue
 
         # Rigid transform t0 → t1, applied to interior sensor-frame points.
+        T1 = _build_box_pose(box1.position, box1.rotation)
         T_1_from_0 = T1 @ T0_inv
         pts0 = xyz0[inside].astype(np.float64)
         pts1 = pts0 @ T_1_from_0[:3, :3].T + T_1_from_0[:3, 3]
@@ -272,7 +302,6 @@ def _per_point_flow(
         better[inside] = new_mag > obj_flow_mag[inside]
         flow[better] = delta[better[inside]]
         obj_flow_mag[better] = new_mag[better[inside]]
-        classes[inside] = box0.category_index
         instance_idx = dclass[track_id] + 1
         instances[better] = instance_idx
 
