@@ -38,7 +38,7 @@ sys.path.append(PARENT_DIR)
 
 from dataprocess.extract_innoviz import (  # noqa: E402  reuse helpers
     DEFAULT_GROUND_CONFIG,
-    _autodetect_height,
+    _autodetect_linefit_params,
     _materialise_ground_config,
 )
 
@@ -73,20 +73,20 @@ def process_sequence(
     if not raw_ids:
         return f"skip {seq_dir}: no polar frames"
 
-    # Resolve height: override > autodetect from frame 0 > toml default.
+    # Resolve LineFit params: override > autodetect from frame 0 > toml default.
     tmp_config_path: Optional[Path] = None
+    params: Optional[dict] = None
     if height_override is not None:
-        chosen_height = float(height_override)
+        params = {"height": float(height_override)}
     elif auto_height:
         dist0 = _load_distance(seq_dir, raw_ids[0])
         xyz0 = (dist0[..., None] * unit_vec).reshape(-1, 3)
         keep0 = dist0.reshape(-1) > 0.0
-        chosen_height = _autodetect_height(xyz0[keep0])
-    else:
-        chosen_height = None
-    if chosen_height is not None:
-        tmp_config_path = _materialise_ground_config(Path(ground_config), chosen_height)
+        params = _autodetect_linefit_params(xyz0[keep0])
+    if params is not None:
+        tmp_config_path = _materialise_ground_config(Path(ground_config), params)
         effective_config = str(tmp_config_path)
+        print(f"[{seq_dir.name}] LineFit params: " + ", ".join(f"{k}={v:.2f}" for k, v in params.items()))
     else:
         effective_config = ground_config
 
@@ -118,7 +118,7 @@ def process_sequence(
     if tmp_config_path is not None:
         tmp_config_path.unlink(missing_ok=True)
 
-    return f"{seq_dir.name}: wrote {n_written}, skipped {n_skipped} (height={chosen_height})"
+    return f"{seq_dir.name}: wrote {n_written}, skipped {n_skipped}"
 
 
 def _worker(args: dict) -> str:

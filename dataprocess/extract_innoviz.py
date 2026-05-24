@@ -87,33 +87,77 @@ MAX_PLAUSIBLE_DISP = 3.0
 IDENTITY_4 = np.eye(4, dtype=np.float32)
 
 
-def _autodetect_height(xyz: np.ndarray) -> float:
-    """Estimate sensor mounting height above ground as ``-p5(Z)`` (positive up).
+def _autodetect_linefit_params(xyz: np.ndarray) -> Dict[str, float]:
+    """Estimate per-sequence LineFit ground-segmentation parameters from the cloud.
 
-    The 5th percentile of sensor-frame Z is a robust proxy for the local ground
-    plane: low enough to exclude object/tree returns, high enough that occasional
-    cliff drops or sensor noise don't pull it down arbitrarily. ``height`` in
-    LineFit's toml is the positive distance from sensor to expected ground.
+    Anchor: ``height = -p5(Z)`` — sensor mount height above expected ground plane
+    (5th-percentile Z is robust to object returns and to occasional cliff/sensor
+    outliers below p1).
+
+    Ground-band thickness estimator: ``spread = p15(Z) - p5(Z)``. This is the
+    vertical extent of the bottom decile of returns and serves as a proxy for
+    how non-flat the ground is. A flat sports field gives ~0.9 m; rolling
+    outdoor terrain with slopes gives 2–4 m; a deep cliff sequence gives more.
+
+    The thickness is then mapped onto the three LineFit parameters that scale
+    with terrain roughness:
+
+      * ``max_start_height``: how far below the expected plane LineFit may anchor
+        its first ground line — must be ≥ the spread for the band to be reachable.
+      * ``max_long_height``: tolerated Z jump between consecutive radial points;
+        scales roughly with half the spread.
+      * ``max_dist_to_line``: lateral tolerance for points labelled ground —
+        scales with one-fifth of the spread, clamped to a usable range.
+
+    ``max_slope`` is **not** auto-derived (it depends on lateral terrain rise/run,
+    not purely on Z statistics) and is kept at the toml default.
     """
-    return float(-np.percentile(xyz[:, 2], AUTO_HEIGHT_PERCENTILE))
+    z = xyz[:, 2]
+    p5 = float(np.percentile(z, 5))
+    p15 = float(np.percentile(z, 15))
+    spread = max(0.0, p15 - p5)
+    return {
+        "height": float(-p5),
+        # Floors of 2.0 / 1.0 / 0.3 reproduce the sprint-tuned defaults exactly;
+        # ceilings keep the estimator from blowing up on hovering-over-valley scenes.
+        "max_start_height": float(np.clip(spread, 2.0, 15.0)),
+        "max_long_height": float(np.clip(spread / 2.0, 1.0, 5.0)),
+        "max_dist_to_line": float(np.clip(spread / 5.0, 0.3, 0.8)),
+    }
 
 
-_HEIGHT_LINE_RE = re.compile(r"^(\s*height\s*=\s*)([^#\n]+)(.*)$", re.MULTILINE)
+# Backwards-compatible thin wrapper used by callers that only want the height.
+def _autodetect_height(xyz: np.ndarray) -> float:
+    return _autodetect_linefit_params(xyz)["height"]
 
 
-def _materialise_ground_config(base_toml: Path, height: float) -> Path:
-    """Copy ``base_toml`` to a tempfile with the ``height`` line replaced.
+_PARAM_LINE_RES = {
+    "height":           re.compile(r"^(\s*height\s*=\s*)([^#\n]+?)(\s*(?:#.*)?)$",           re.MULTILINE),
+    "max_start_height": re.compile(r"^(\s*max_start_height\s*=\s*)([^#\n]+?)(\s*(?:#.*)?)$", re.MULTILINE),
+    "max_long_height":  re.compile(r"^(\s*max_long_height\s*=\s*)([^#\n]+?)(\s*(?:#.*)?)$",  re.MULTILINE),
+    "max_dist_to_line": re.compile(r"^(\s*max_dist_to_line\s*=\s*)([^#\n]+?)(\s*(?:#.*)?)$", re.MULTILINE),
+}
+
+
+def _materialise_ground_config(base_toml: Path, params: Dict[str, float]) -> Path:
+    """Copy ``base_toml`` to a tempfile with the named parameters substituted.
 
     LineFit reads its parameters from disk on construction, so per-sequence
     overrides need an on-disk file. Caller is responsible for cleaning up.
+    Only keys present in :data:`_PARAM_LINE_RES` are honoured; missing keys
+    raise ``RuntimeError`` so a typo can't silently fall through to the default.
     """
     text = base_toml.read_text()
-    new_text, n = _HEIGHT_LINE_RE.subn(rf"\g<1>{height:.4f}\g<3>", text, count=1)
-    if n == 0:
-        raise RuntimeError(f"Could not find a 'height = ...' line in {base_toml}")
+    for key, value in params.items():
+        regex = _PARAM_LINE_RES.get(key)
+        if regex is None:
+            raise RuntimeError(f"No substitution regex registered for LineFit param '{key}'")
+        text, n = regex.subn(rf"\g<1>{value:.4f}\g<3>", text, count=1)
+        if n == 0:
+            raise RuntimeError(f"Could not find a '{key} = ...' line in {base_toml}")
     fd, tmp_path = tempfile.mkstemp(prefix="innoviz_ground_", suffix=".toml")
     with os.fdopen(fd, "w") as f:
-        f.write(new_text)
+        f.write(text)
     return Path(tmp_path)
 
 
@@ -371,22 +415,21 @@ def process_sequence(
 
     tracks, _ = _parse_annotations(seq_dir / "annotations" / "manual_gt.json")
 
-    # Decide sensor-mount height: explicit override > autodetect from frame 0 > toml default.
+    # Decide LineFit params: explicit override > autodetect from frame 0 > toml default.
     tmp_config_path: Optional[Path] = None
+    params: Optional[Dict[str, float]] = None
     if height_override is not None:
-        chosen_height = float(height_override)
+        params = {"height": float(height_override)}
     elif auto_height:
-        first_frame_idx, first_raw_id = frame_pairs[0]
+        _, first_raw_id = frame_pairs[0]
         distance0 = _read_polar_frame(seq_dir, first_raw_id)
         xyz0_all = (distance0[..., None] * unit_vec).reshape(-1, 3)
         keep0 = distance0.reshape(-1) > 0.0
-        chosen_height = _autodetect_height(xyz0_all[keep0])
-    else:
-        chosen_height = None
-    if chosen_height is not None:
-        tmp_config_path = _materialise_ground_config(Path(ground_config), chosen_height)
+        params = _autodetect_linefit_params(xyz0_all[keep0])
+    if params is not None:
+        tmp_config_path = _materialise_ground_config(Path(ground_config), params)
         effective_config = str(tmp_config_path)
-        print(f"[{scene_id}] using height={chosen_height:.2f} m (config: {effective_config})")
+        print(f"[{scene_id}] LineFit params: " + ", ".join(f"{k}={v:.2f}" for k, v in params.items()))
     else:
         effective_config = ground_config
 
