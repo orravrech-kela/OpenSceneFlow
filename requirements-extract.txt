@@ -1,0 +1,7 @@
+numpy<2
+scipy
+h5py
+tqdm
+pyyaml
+fire
+linefit==1.1.0

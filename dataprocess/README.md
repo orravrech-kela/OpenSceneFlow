@@ -185,6 +185,7 @@ This directory contains the scripts to preprocess the datasets into `.h5` files.
 - `extract_waymo.py`: Process the datasets in Waymo.
 - `extract_zod.py`: Process the datasets in ZOD.
 - `extract_truckscene.py`: Process the datasets in TruckScene.
+- `extract_innoviz.py`: Process custom Innoviz LiDAR recordings (polar `.npz` + CVAT cuboid annotations). See [Innoviz](#innoviz) below.
 
 Example Running command, you can also check our [slurm data-process script](../assets/slurm/data-process.sh) for more details.:
 ```bash
@@ -237,6 +238,79 @@ Or you can run testing file to visualize the data.
 python tools/visualization.py --data_dir /home/kin/data/av2/h5py/sensor/mini --res_name flow
 
 python tools/visualization.py --data_dir /home/kin/data/waymo/h5py/val --res_name flow
+```
+
+### Innoviz
+
+Custom Innoviz LiDAR recordings stored as per-frame polar `.npz` (`distance`,
+`reflectivity`, `pixel_time`), a shared `lut.npz` (`unit_vec` for polar→cartesian),
+optional `fg/` masks, and CVAT cuboid annotations in `annotations/manual_gt.json`.
+The sensor is statically mounted so ego-pose and ego-flow are identity/zero.
+
+1. Fill in `conf/innoviz_splits.yaml` with the `<recording_day>/<sequence_name>`
+   entries you want in `train:` and `val:`.
+2. Tune `conf/others/innoviz.toml` (LineFit ground-segmentation params) to the
+   actual sensor mounting height and outdoor terrain.
+3. Run the extractor:
+
+```bash
+python dataprocess/extract_innoviz.py \
+  --data_root /mnt/data/lidar/processed \
+  --output_dir /mnt/data/lidar/h5/innoviz \
+  --splits_file conf/innoviz_splits.yaml \
+  --split both \
+  --num_workers 4
+```
+
+This produces `<output_dir>/{train,val}/<scene_id>.h5` plus `index_total.pkl`
+and `index_flow.pkl` per split. Class taxonomy lives in `src/utils/innoviz_eval.py`
+(`{NONE, vehicle, person, drone, animal}`); unmapped raw labels are silently dropped.
+
+To visualise ground segmentation with `lidar/scripts/visualization/offline_viewer.py`,
+run the standalone sidecar writer; it produces per-frame `(480, 1200)` bool npz masks
+that the viewer reads via `--fg-dir`:
+
+```bash
+python dataprocess/save_ground_masks.py \
+  --data_root /mnt/data/lidar/processed \
+  --sequences gan_shomron_27_11_2025/sprint \
+  --subdir ground \
+  --num_workers 4
+```
+
+For ground-truth flow, run the flow-sidecar writer (per-frame `(480, 1200, 3)` float32 +
+`(480, 1200)` bool mask). The viewer reads it via the new `--flow-dir`; points get
+colored by direction (hue) and magnitude (saturation) using OpenSceneFlow's color wheel:
+
+```bash
+python dataprocess/save_flow_masks.py \
+  --data_root /mnt/data/lidar/processed \
+  --sequences gan_shomron_27_11_2025/sprint \
+  --subdir flow \
+  --num_workers 4
+```
+
+Then in the lidar viewer (uses its own uv env):
+
+```bash
+uv run python offline_viewer.py \
+  --polar-folder /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint/polar \
+  --lut         /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint/lut.npz \
+  --fg-dir      /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint/ground \
+  --flow-dir    /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint/flow
+```
+
+To fine-tune DeltaFlow from an AV2-pretrained checkpoint (loaded non-strict via
+`cfg.pretrained_weights`, **not** `cfg.checkpoint`):
+
+```bash
+python train.py \
+  model=deltaflow \
+  train_data=/mnt/data/lidar/h5/innoviz/train \
+  val_data=/mnt/data/lidar/h5/innoviz/val \
+  pretrained_weights=checkpoints/deltaflow_av2.ckpt \
+  epochs=20 batch_size=2 num_frames=2 \
+  optimizer.lr=5e-4 train_aug=True loss_fn=deflowLoss
 ```
 
 ### Self-Supervised Process
