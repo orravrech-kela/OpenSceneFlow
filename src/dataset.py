@@ -239,10 +239,14 @@ class HDF5Dataset(Dataset):
                 }
             else:
                 bounds = self.scene_id_bounds[scene_id]
-                if timestamp < bounds["min_timestamp"]:
+                # int compare: AV2/Waymo timestamps happen to be fixed-width
+                # nanoseconds, but custom extractors (e.g. Innoviz) emit
+                # variable-width frame_idx * period which mis-sorts as strings.
+                ts_i = int(timestamp)
+                if ts_i < int(bounds["min_timestamp"]):
                     bounds["min_timestamp"] = timestamp
                     bounds["min_index"] = idx
-                if timestamp > bounds["max_timestamp"]:
+                if ts_i > int(bounds["max_timestamp"]):
                     bounds["max_timestamp"] = timestamp
                     bounds["max_index"] = idx
         
