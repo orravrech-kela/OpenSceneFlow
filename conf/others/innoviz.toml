@@ -1,0 +1,31 @@
+# LineFit ground segmentation parameters for Innoviz LiDAR (static mount).
+# Tuned on `gan_shomron_27_11_2025/sprint`: ~27% ground coverage, 86% recall on
+# the true ground band (Z ∈ [sensor-1m, sensor]). Outdoor terrain with foliage,
+# distant returns to 400+ m, occasional cliff/peak drops require looser thresholds
+# than the nuScenes defaults.
+#
+# `height` is overwritten per sequence when the extractor runs with --auto_height
+# (default), using -p5(Z) on the first frame as a robust mount-height estimate.
+
+[important]
+height = 4.7         # placeholder; replaced per sequence by --auto_height.
+
+[segments]
+r_min = 0.5
+r_max = 200          # Innoviz reaches >400 m; cap at 200 m for speed.
+n_segments = 360
+n_bins = 240
+
+[ground]
+min_slope = 0.0
+max_slope = 0.4      # ~22°; uneven outdoor terrain.
+long_threshold = 2.0
+max_long_height = 1.0  # tolerate ~1 m vertical jumps between consecutive radial points.
+max_start_height = 2.0 # first ground line may sit up to 2 m off the expected plane.
+max_fit_error = 0.2
+max_dist_to_line = 0.3
+line_search_angle = 2.0
+
+[general]
+n_threads = 8
+verbose = false

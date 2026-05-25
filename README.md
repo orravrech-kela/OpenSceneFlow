@@ -101,6 +101,25 @@ cd OpenSceneFlow && conda env create -f environment.yaml
 ```
 We also provide [requirements.txt](requirements.txt), please check usage through [Dockerfile](Dockerfile).
 
+### Install (uv)
+
+For a lightweight install via [uv](https://docs.astral.sh/uv/) — recommended if you only need to **extract data** (no GPU / no PyTorch):
+
+```bash
+uv venv --python 3.10
+source .venv/bin/activate
+uv pip install -r requirements-extract.txt
+```
+
+Full training stack (PyTorch / Lightning / spconv) — note CUDA-specific wheels still need to match your driver:
+
+```bash
+uv pip install -r requirements-train.txt
+# Then build the CUDA extensions as in the conda path above:
+cd assets/cuda/chamfer3D && python ./setup.py install && cd -
+cd assets/cuda/mmcv && python ./setup.py install && cd -
+```
+
 ### Docker (Recommended for Isolation)
 
 You always can choose [Docker](https://en.wikipedia.org/wiki/Docker_(software)) which isolated environment and free yourself from installation. Pull the pre-built Docker image or build manually.

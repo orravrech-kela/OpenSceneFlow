@@ -1,0 +1,32 @@
+-r requirements-extract.txt
+
+# Deep learning stack (mirrors environment.yaml versions; pin only what upstream pins)
+torch==2.0.0
+torchvision
+lightning==2.0.1
+spconv-cu117==2.3.6
+
+# Hydra / config
+omegaconf
+hydra-core
+
+# Logging / utilities
+tensorboard
+wandb
+numba
+pandas
+scikit-learn==1.3.2
+hdbscan
+fire
+tabulate
+rerun-sdk
+open3d==0.18.0
+av2==0.2.1
+
+# Qingwen's public packages
+dztimer
+dufomap==1.1.0
+
+# Pinned compatibility (see environment.yaml comments)
+setuptools==69.5.1
+mkl==2024.0.0
