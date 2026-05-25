@@ -1,0 +1,11 @@
+# Train / val splits for the Innoviz dataset, consumed by dataprocess/extract_innoviz.py.
+# Sequences are listed as "<recording_day>/<sequence_name>" — matching the directory
+# layout under --data_root (e.g. /mnt/data/lidar/processed/<recording_day>/<sequence_name>).
+#
+# Copy this file to conf/innoviz_splits.yaml (gitignored) and fill in the sequences
+# you have on disk. Both lists must be non-empty when running the extractor in
+# train+val mode; the CLI accepts --split train|val|both to process a subset.
+
+train: []
+
+val: []

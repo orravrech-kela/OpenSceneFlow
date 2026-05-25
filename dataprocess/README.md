@@ -247,8 +247,9 @@ Custom Innoviz LiDAR recordings stored as per-frame polar `.npz` (`distance`,
 optional `fg/` masks, and CVAT cuboid annotations in `annotations/manual_gt.json`.
 The sensor is statically mounted so ego-pose and ego-flow are identity/zero.
 
-1. Fill in `conf/innoviz_splits.yaml` with the `<recording_day>/<sequence_name>`
-   entries you want in `train:` and `val:`.
+1. Copy `conf/innoviz_splits.example.yaml` to `conf/innoviz_splits.yaml` (the
+   live file is gitignored — per-operator state) and fill in the
+   `<recording_day>/<sequence_name>` entries you want in `train:` and `val:`.
 2. Tune `conf/others/innoviz.toml` (LineFit ground-segmentation params) to the
    actual sensor mounting height and outdoor terrain.
 3. Run the extractor:
