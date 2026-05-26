@@ -36,8 +36,38 @@ def extract_flow_number(key):
         return digits[0]
     return '0'
 
+# Minimum non-ground IN-RANGE pc0 points per sample for the sample to be included in the
+# batch. Below this, the voxelizer in DynamicPillarFeatureNet often yields ≤1 unique voxel
+# across the whole batch, which crashes BatchNorm1d ("Expected more than 1 value per
+# channel when training"). 50 is comfortably above the BN-safe threshold of 2 voxels
+# at voxel_size=0.15 — keeps near-empty innoviz frames out without hurting density.
+MIN_PC0_NON_GROUND_POINTS = 50
+
+
+def _sample_is_usable(single_data, point_cloud_range=None):
+    if 'pc0' not in single_data or 'gm0' not in single_data:
+        return True
+    pc0 = single_data['pc0']
+    gm0 = single_data['gm0']
+    nonground = pc0[~gm0]
+    if point_cloud_range is not None and nonground.numel() > 0:
+        # Use the same axis-aligned filter as Voxelization in the model.
+        x_min, y_min, z_min, x_max, y_max, z_max = point_cloud_range
+        xyz = nonground[:, :3]
+        in_range = (
+            (xyz[:, 0] >= x_min) & (xyz[:, 0] < x_max) &
+            (xyz[:, 1] >= y_min) & (xyz[:, 1] < y_max) &
+            (xyz[:, 2] >= z_min) & (xyz[:, 2] < z_max)
+        )
+        nonground = nonground[in_range]
+    return int(nonground.shape[0]) >= MIN_PC0_NON_GROUND_POINTS
+
+
 # FIXME(Qingwen 2025-08-20): update more pretty here afterward!
-def collate_fn_pad(batch):
+def collate_fn_pad(batch, point_cloud_range=None):
+    batch = [s for s in batch if _sample_is_usable(s, point_cloud_range=point_cloud_range)]
+    if len(batch) == 0:
+        return None
     batch_size_ = len(batch)
     pcs_after_mask_ground, poses_dict, flows_after_mask_ground = {}, {}, {}
     

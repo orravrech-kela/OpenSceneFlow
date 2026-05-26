@@ -7,8 +7,10 @@ Mirrors `dataprocess/extract_nus.py` but for the custom Innoviz dataset stored a
   * `lut.npz`              — shared LUT, `unit_vec` shape (480, 1200, 3) so that
                               cartesian = distance[..., None] * unit_vec.
   * `fg/<frame_id>.npz`    — `is_foreground` mask (unused here; reserved for SSL).
-  * `annotations/manual_gt.json` — CVAT cuboid_3d annotations with per-frame items
-                                    keyed by `attr.frame` (sequence-relative index).
+  * `annotations/ground_truth.json` (preferred) or `annotations/manual_gt.json`
+                                    (fallback) — CVAT cuboid_3d annotations with
+                                    per-frame items keyed by `attr.frame`
+                                    (sequence-relative index).
 
 Sensor is statically mounted, so ego_pose == identity and ego_flow == 0 everywhere.
 Per-point flow comes from rigid box-to-box transforms applied to interior points.
@@ -203,6 +205,20 @@ def _se3_inverse(T: np.ndarray) -> np.ndarray:
     return Tinv
 
 
+def _annotations_path(seq_dir: Path) -> Path:
+    """Prefer ground_truth.json (newer canonical export); fall back to manual_gt.json."""
+    gt = seq_dir / "annotations" / "ground_truth.json"
+    if gt.exists():
+        return gt
+    mgt = seq_dir / "annotations" / "manual_gt.json"
+    if mgt.exists():
+        return mgt
+    raise FileNotFoundError(
+        f"No annotations found under {seq_dir / 'annotations'}: "
+        f"expected ground_truth.json or manual_gt.json"
+    )
+
+
 def _parse_annotations(
     annotations_path: Path,
 ) -> Tuple[Dict[int, Dict[int, BoxAnnotation]], int]:
@@ -242,19 +258,27 @@ def _parse_annotations(
 def _enumerate_frames(seq_dir: Path) -> List[Tuple[int, str]]:
     """Discover available polar frames; returns sorted ``(frame_idx, raw_id)`` pairs.
 
-    ``frame_idx`` is the sequence-relative index (0-based), used as the HDF5 group
-    name basis. ``raw_id`` is the filename stem (e.g. ``"00000481"``) used to load
-    the per-frame npz files. CVAT annotation `id`s come with different zero-pad
-    widths across recordings (6 vs 8 digits), while polar filenames are always
-    8-digit, so we resolve the actual filename by listing the polar dir once.
+    ``frame_idx`` is the polar-file integer (= ``attr.frame`` in annotations),
+    used as the HDF5 group name basis via ``frame_idx * frame_period_ns``.
+    ``raw_id`` is the polar filename stem (e.g. ``"00007321"``).
+
+    Annotations must use polar-file numbering: ``id`` parses to an integer
+    matching a polar stem. If you have a 0-based serial export from CVAT,
+    normalize it first with
+    ``algorithms/projects/lidar/scripts/data_prep/convert_annotations_to_global.py``.
+    Items whose ``id`` doesn't resolve to any polar file are reported and the
+    extraction fails fast — the silent positional fallback that used to live
+    here masked real corruption (e.g. duplicate polar-frame extraction when
+    the id range overlapped polar but was offset).
     """
-    annotations_path = seq_dir / "annotations" / "manual_gt.json"
+    annotations_path = _annotations_path(seq_dir)
     with open(annotations_path) as f:
         data = json.load(f)
     polar_dir = seq_dir / "polar"
     polar_files = {p.stem: p for p in polar_dir.glob("*.npz")}
     polar_by_int = {int(stem): stem for stem in polar_files}
     pairs: List[Tuple[int, str]] = []
+    unresolved: List[str] = []
     for item in data["items"]:
         try:
             raw_int = int(item["id"])
@@ -262,8 +286,18 @@ def _enumerate_frames(seq_dir: Path) -> List[Tuple[int, str]]:
             continue
         frame_idx = int(item["attr"]["frame"])
         raw_id = polar_by_int.get(raw_int)
-        if raw_id is not None:
-            pairs.append((frame_idx, raw_id))
+        if raw_id is None:
+            unresolved.append(str(item["id"]))
+            continue
+        pairs.append((frame_idx, raw_id))
+    if unresolved:
+        sample = ", ".join(unresolved[:5])
+        more = f" (+{len(unresolved)-5} more)" if len(unresolved) > 5 else ""
+        raise RuntimeError(
+            f"{annotations_path}: {len(unresolved)} annotation ids do not match any "
+            f"polar file in {polar_dir} (e.g. {sample}{more}). Run "
+            f"convert_annotations_to_global.py on this sequence first."
+        )
     pairs.sort(key=lambda p: p[0])
     return pairs
 
@@ -413,7 +447,7 @@ def process_sequence(
     if check_h5py_file_exists(output_h5, timestamps):
         return f"skip {scene_id} (already complete)"
 
-    tracks, _ = _parse_annotations(seq_dir / "annotations" / "manual_gt.json")
+    tracks, _ = _parse_annotations(_annotations_path(seq_dir))
 
     # Decide LineFit params: explicit override > autodetect from frame 0 > toml default.
     tmp_config_path: Optional[Path] = None

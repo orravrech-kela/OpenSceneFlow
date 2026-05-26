@@ -22,8 +22,11 @@ import torch.nn as nn
 
 from .basic import cal_pose0to1
 from .basic.nsfp_module import Neural_Prior, EarlyStopping
-from assets.cuda.chamfer3D import nnChamferDis
-MyCUDAChamferDis = nnChamferDis()
+try:
+    from assets.cuda.chamfer3D import nnChamferDis
+    MyCUDAChamferDis = nnChamferDis()
+except ImportError:
+    MyCUDAChamferDis = None
                 
 class NSFP(nn.Module):
     def __init__(self, filter_size=128, act_fn='relu', layer_size=8, \

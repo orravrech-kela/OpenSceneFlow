@@ -5,8 +5,9 @@ defaults:
   
 slurm_id: 00000
 
-wandb_mode: disabled # [offline, disabled, online]
-wandb_project_name: seflow
+wandb_mode: online # [offline, disabled, online]
+wandb_project_name: opensceneflow
+wandb_entity: orr-a-kelasys
 
 train_data: /home/kin/data/av2/h5py/demo/train
 train_aug: False # involved by deltaflow

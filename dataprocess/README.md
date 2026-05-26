@@ -244,8 +244,10 @@ python tools/visualization.py --data_dir /home/kin/data/waymo/h5py/val --res_nam
 
 Custom Innoviz LiDAR recordings stored as per-frame polar `.npz` (`distance`,
 `reflectivity`, `pixel_time`), a shared `lut.npz` (`unit_vec` for polar→cartesian),
-optional `fg/` masks, and CVAT cuboid annotations in `annotations/manual_gt.json`.
-The sensor is statically mounted so ego-pose and ego-flow are identity/zero.
+optional `fg/` masks, and CVAT cuboid annotations in either
+`annotations/ground_truth.json` (preferred — newer canonical export) or
+`annotations/manual_gt.json` (fallback). The sensor is statically mounted so
+ego-pose and ego-flow are identity/zero.
 
 1. Copy `conf/innoviz_splits.example.yaml` to `conf/innoviz_splits.yaml` (the
    live file is gitignored — per-operator state) and fill in the
@@ -301,15 +303,15 @@ uv run python offline_viewer.py \
   --flow-dir    /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint/flow
 ```
 
-To fine-tune DeltaFlow from an AV2-pretrained checkpoint (loaded non-strict via
-`cfg.pretrained_weights`, **not** `cfg.checkpoint`):
+To fine-tune DeltaFlow from a Waymo- or AV2-pretrained checkpoint (loaded
+non-strict via `cfg.pretrained_weights`, **not** `cfg.checkpoint`):
 
 ```bash
 python train.py \
   model=deltaflow \
   train_data=/mnt/data/lidar/h5/innoviz/train \
   val_data=/mnt/data/lidar/h5/innoviz/val \
-  pretrained_weights=checkpoints/deltaflow_av2.ckpt \
+  pretrained_weights=model_zoo/deltaflow-waymo.ckpt \
   epochs=20 batch_size=2 num_frames=2 \
   optimizer.lr=5e-4 train_aug=True loss_fn=deflowLoss
 ```

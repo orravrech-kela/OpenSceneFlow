@@ -10,8 +10,13 @@
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-from .deflow import DeFlow, DeFlowPP
-from .fastflow3d import FastFlow3D
+try:
+    from .deflow import DeFlow, DeFlowPP
+    from .fastflow3d import FastFlow3D
+except ImportError as e:
+    print("\033[93m--- WARNING [model]: DeFlow/FastFlow3D not imported (need mmcv voxelization CUDA ext).")
+    print(f"Detail error message\033[0m: {e}. Ignore if not training these models.")
+
 from .nsfp import NSFP
 
 # check README for package:
