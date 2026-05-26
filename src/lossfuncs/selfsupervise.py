@@ -26,8 +26,12 @@
 #   'cluster_loss_args': dict  (teflowLoss only)
 """
 import torch
-from assets.cuda.chamfer3D import nnChamferDis
-MyCUDAChamferDis = nnChamferDis()
+try:
+    from assets.cuda.chamfer3D import nnChamferDis
+    MyCUDAChamferDis = nnChamferDis()
+except ImportError:
+    # CUDA extension not built; SSL losses below will fail at call time, not import time.
+    MyCUDAChamferDis = None
 
 # NOTE(Qingwen 24/07/06): squared, so it's sqrt(4) = 2m, in 10Hz the vel = 20m/s ~ 72km/h
 # If your scenario is different, may need adjust this TRUNCATED to 80-120km/h vel.

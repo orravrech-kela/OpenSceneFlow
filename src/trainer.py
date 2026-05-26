@@ -17,7 +17,7 @@ import torch
 import torch.optim as optim
 from pathlib import Path
 
-from lightning import LightningModule
+from pytorch_lightning import LightningModule
 from hydra.utils import instantiate
 from omegaconf import OmegaConf, open_dict
 
@@ -200,6 +200,9 @@ class ModelWrapper(LightningModule):
         return total_loss
     
     def training_step(self, batch, batch_idx):
+        if batch is None:
+            # collate_fn_pad dropped every sample as too sparse (BN-safety filter).
+            return None
         total_loss = 0.0
         self.model.timer[5].start("Training Step")
         self.model.timer[5][0].start("Forward")
@@ -377,6 +380,8 @@ curl -X POST https://sceneflow.argoverse.org/submissions/upload \\
         return batch, res_dict
     
     def validation_step(self, batch, batch_idx):
+        if batch is None:
+            return None
         try:
             if self.data_mode in ['val', 'valid'] or self.data_mode == 'test':
                 batch, res_dict = self.run_model_wo_ground_data(batch)
@@ -387,7 +392,8 @@ curl -X POST https://sceneflow.argoverse.org/submissions/upload \\
                 self.train_validation_step_(batch, res_dict)
         except Exception as e:
             print(f"==> Exception occur during training/validation step: {e}. Skip this batch.")
-            print(f"Batch info: scene_id: {batch['scene_id']}, timestamp: {batch['timestamp']}, pc0 size: {batch['pc0']}")
+            scene_ids = batch.get('scene_id') if isinstance(batch, dict) else None
+            print(f"Batch info: scene_id: {scene_ids}, batch keys: {list(batch.keys()) if isinstance(batch, dict) else type(batch).__name__}")
     
     def test_step(self, batch, batch_idx):
         batch, res_dict = self.run_model_wo_ground_data(batch)

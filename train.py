@@ -13,15 +13,16 @@
 
 import torch
 from torch.utils.data import DataLoader
-import lightning.pytorch as pl
-from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-from lightning.pytorch.callbacks import (
+import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint
 )
 
 from omegaconf import DictConfig, OmegaConf
 import hydra, wandb, os, math
+from functools import partial
 from hydra.core.hydra_config import HydraConfig
 from pathlib import Path
 
@@ -63,11 +64,12 @@ def main(cfg):
                     n_frames=cfg.num_frames,
                     ssl_label=cfg.get('ssl_label', None),
                     transform=train_aug)
+    collate = partial(collate_fn_pad, point_cloud_range=list(cfg.point_cloud_range))
     train_loader = DataLoader(train_dataset,
                               batch_size=cfg.batch_size,
                               shuffle=True,
                               num_workers=cfg.num_workers,
-                              collate_fn=collate_fn_pad,
+                              collate_fn=collate,
                               pin_memory=True)
     val_loader = DataLoader(HDF5Dataset(cfg.val_data, \
                                 n_frames=cfg.num_frames,\
@@ -75,7 +77,7 @@ def main(cfg):
                             batch_size=cfg.batch_size,
                             shuffle=False,
                             num_workers=cfg.num_workers,
-                            collate_fn=collate_fn_pad,
+                            collate_fn=collate,
                             pin_memory=True)
                             
     # count gpus, overwrite gpus
@@ -113,8 +115,8 @@ def main(cfg):
 
     if cfg.wandb_mode != "disabled":
         logger = WandbLogger(save_dir=output_dir,
-                            entity="kth-rpl",
-                            project=f"{cfg.wandb_project_name}", 
+                            entity=cfg.wandb_entity,
+                            project=f"{cfg.wandb_project_name}",
                             name=f"{cfg.output}",
                             offline=(cfg.wandb_mode == "offline"),
                             log_model=(True if cfg.wandb_mode == "online" else False))

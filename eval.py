@@ -12,8 +12,8 @@
 
 import torch
 from torch.utils.data import DataLoader
-import lightning.pytorch as pl
-from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
+import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from omegaconf import DictConfig
 import hydra, wandb, os, sys
 from hydra.core.hydra_config import HydraConfig
@@ -61,8 +61,8 @@ def main(cfg):
 
     if cfg.wandb_mode != "disabled":
         logger = WandbLogger(save_dir=output_dir,
-                            entity="kth-rpl",
-                            project=f"opensf-eval", 
+                            entity=cfg.wandb_entity,
+                            project=f"{cfg.wandb_project_name}-eval",
                             name=f"{cfg.output}",
                             offline=(cfg.wandb_mode == "offline"))
         logger.watch(mymodel, log_graph=False)
