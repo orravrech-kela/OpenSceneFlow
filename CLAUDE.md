@@ -102,4 +102,28 @@ We use Weights & Biases for experiment tracking. Defaults are wired up in
 - `wandb_project_name: opensceneflow`
 - `wandb_mode: online`
 
-Override with `wandb_mode=disabled` for smoke / debug runs.
+Override with `wandb_mode=offline` for smoke / debug runs. Run `wandb login`
+once interactively on the host before the first `online` run — Claude can't
+paste the API key for you.
+
+## Smoke train command
+
+Use this to verify the full train→val loop works end-to-end after any
+infrastructural change (env upgrade, code edit in the model/extractor/trainer).
+Uses the exact `voxel_size` / `point_cloud_range` / `loss_fn` the Waymo ckpt
+was trained with (recovered from its `hyper_parameters.cfg`), so non-strict
+ckpt load matches every layer:
+
+```bash
+.venv/bin/python train.py \
+  model=deltaflow \
+  train_data=/mnt/data/lidar/h5/innoviz/train \
+  val_data=/mnt/data/lidar/h5/innoviz/val \
+  pretrained_weights=model_zoo/deltaflow-waymo.ckpt \
+  epochs=1 batch_size=2 num_frames=2 \
+  optimizer.lr=5e-4 train_aug=True loss_fn=deltaflowLoss \
+  val_every=1 num_workers=2 \
+  "voxel_size=[0.15, 0.15, 0.15]" \
+  "point_cloud_range=[-38.4, -38.4, -3, 38.4, 38.4, 3]" \
+  wandb_mode=offline
+```
