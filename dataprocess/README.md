@@ -269,6 +269,39 @@ This produces `<output_dir>/{train,val}/<scene_id>.h5` plus `index_total.pkl`
 and `index_flow.pkl` per split. Class taxonomy lives in `src/utils/innoviz_eval.py`
 (`{NONE, vehicle, person, drone, animal}`); unmapped raw labels are silently dropped.
 
+#### Re-extracting only the flow datasets after a relabel
+
+If you re-export annotations for a sequence (fixing a box, changing a class,
+adding a track) and the **frame set is unchanged**, you don't need to re-run
+the full extractor — `update_innoviz_annotations.py` rewrites only the four
+annotation-derived datasets (`flow`, `flow_is_valid`, `flow_category_indices`,
+`flow_instance_id`) in place. `lidar`, `pose`, and `ground_mask` are copied
+verbatim from the existing H5, so LineFit isn't re-run and there's no thread
+non-determinism on ground masks. Typically 3–5× faster than a full re-extract.
+
+```bash
+# Dry-run preview (always do this first)
+python dataprocess/update_innoviz_annotations.py \
+  --sequences "gan_shomron_27_11_2025/sprint, meginim_11_02_2026/tirgolet16"
+
+# Apply
+python dataprocess/update_innoviz_annotations.py \
+  --sequences "gan_shomron_27_11_2025/sprint, meginim_11_02_2026/tirgolet16" \
+  --num_workers 2 --execute
+```
+
+Constraints:
+- Annotations must already be in POLAR-NUM (`id` parses to a polar filename
+  integer). If your re-export went out as 0-based SEQ-IDX, run
+  `algorithms/projects/lidar/scripts/data_prep/convert_annotations_to_global.py`
+  on the sequence first.
+- The frame set must be a subset of the existing H5's frames. **Removed**
+  frames are dropped automatically; **added** frames (new `attr.frame` not in
+  the H5) abort with a clear message — those require a full re-extract because
+  the new frame's `lidar`/`ground_mask` haven't been computed yet.
+- `index_total.pkl` / `index_flow.pkl` are not rebuilt — timestamps don't
+  change for kept frames. Rebuild manually if you want a clean index.
+
 To visualise ground segmentation with `lidar/scripts/visualization/offline_viewer.py`,
 run the standalone sidecar writer; it produces per-frame `(480, 1200)` bool npz masks
 that the viewer reads via `--fg-dir`:

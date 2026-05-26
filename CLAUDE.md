@@ -49,6 +49,26 @@ config — always cross-check the ckpt before changing these values.
 `deltaflowLoss`. Using a different loss for finetune is allowed but you'd lose
 the loss-scale matching that the ckpt's optimizer state encodes.
 
+## Relabel workflow
+
+For label-only changes (box positions, classes, track ids — anything that
+doesn't add/remove frame entries), use
+`dataprocess/update_innoviz_annotations.py` instead of re-running the full
+extractor. It rewrites only `flow`, `flow_is_valid`, `flow_category_indices`,
+`flow_instance_id` per frame and preserves `lidar`/`pose`/`ground_mask` bit-
+exact (no LineFit re-run → no thread-non-determinism jitter). Atomic via
+`.h5.tmp` + rename; safe to interrupt. ~3–5× faster than a full re-extract.
+
+```bash
+python dataprocess/update_innoviz_annotations.py \
+  --sequences "gan_shomron_27_11_2025/sprint, meginim_11_02_2026/tirgolet16" \
+  --num_workers 2 --execute
+```
+
+Aborts if the relabel introduces new `attr.frame` values absent from the H5
+(those require a full re-extract — `lidar`/`ground_mask` haven't been computed).
+Removed frames are dropped from the rewritten H5 silently.
+
 ## Extractor: annotation file resolution
 
 `dataprocess/extract_innoviz.py::_annotations_path` prefers
