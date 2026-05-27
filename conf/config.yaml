@@ -27,6 +27,10 @@ batch_size: 1
 epochs: 3
 gradient_clip_val: 5.0
 
+# sanity-check flags (PL Trainer); leave at defaults for real runs
+overfit_batches: 0       # 0 = off; 1 (or e.g. 0.01) reuses N batches for train+val with shuffle off
+fast_dev_run: false      # true = 1 train+val batch then exit, no logging/ckpts
+
 # optimizer ==> Adam
 optimizer:
   name: Adam # [Adam, AdamW]
