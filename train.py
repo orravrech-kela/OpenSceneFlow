@@ -64,7 +64,9 @@ def main(cfg):
                     n_frames=cfg.num_frames,
                     ssl_label=cfg.get('ssl_label', None),
                     transform=train_aug)
-    collate = partial(collate_fn_pad, point_cloud_range=list(cfg.point_cloud_range))
+    collate = partial(collate_fn_pad,
+                      point_cloud_range=list(cfg.point_cloud_range),
+                      voxel_size=list(cfg.voxel_size))
     train_loader = DataLoader(train_dataset,
                               batch_size=cfg.batch_size,
                               shuffle=True,

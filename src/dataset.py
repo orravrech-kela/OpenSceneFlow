@@ -36,15 +36,18 @@ def extract_flow_number(key):
         return digits[0]
     return '0'
 
-# Minimum non-ground IN-RANGE pc0 points per sample for the sample to be included in the
-# batch. Below this, the voxelizer in DynamicPillarFeatureNet often yields ≤1 unique voxel
-# across the whole batch, which crashes BatchNorm1d ("Expected more than 1 value per
-# channel when training"). 50 is comfortably above the BN-safe threshold of 2 voxels
-# at voxel_size=0.15 — keeps near-empty innoviz frames out without hurting density.
+# Filter thresholds for keeping a sample in the batch. Both must pass.
+# Below these, the voxelizer in DynamicPillarFeatureNet can yield ≤1 unique voxel
+# across the whole batch, which crashes BatchNorm1d ("Expected more than 1 value
+# per channel when training"). The point-count check is a cheap early-out at
+# typical voxel sizes; the voxel-count check is the principled BN-safety floor
+# (matters most at coarser voxel_size where many points can cluster into one
+# voxel, e.g. a distant drone at voxel_size=0.4).
 MIN_PC0_NON_GROUND_POINTS = 50
+MIN_PC0_NON_GROUND_VOXELS = 2
 
 
-def _sample_is_usable(single_data, point_cloud_range=None):
+def _sample_is_usable(single_data, point_cloud_range=None, voxel_size=None):
     if 'pc0' not in single_data or 'gm0' not in single_data:
         return True
     pc0 = single_data['pc0']
@@ -60,12 +63,27 @@ def _sample_is_usable(single_data, point_cloud_range=None):
             (xyz[:, 2] >= z_min) & (xyz[:, 2] < z_max)
         )
         nonground = nonground[in_range]
-    return int(nonground.shape[0]) >= MIN_PC0_NON_GROUND_POINTS
+
+    # Cheap point-count check first — catches the bulk of near-empty frames.
+    if int(nonground.shape[0]) < MIN_PC0_NON_GROUND_POINTS:
+        return False
+
+    # Voxel-count check — only meaningful when both voxel_size + point_cloud_range
+    # are plumbed through (otherwise we skip and rely on the point-count check).
+    if voxel_size is not None and point_cloud_range is not None and nonground.numel() > 0:
+        vs = torch.as_tensor(voxel_size, dtype=nonground.dtype, device=nonground.device)
+        origin = torch.as_tensor(point_cloud_range[:3], dtype=nonground.dtype, device=nonground.device)
+        voxel_coords = torch.floor((nonground[:, :3] - origin) / vs).to(torch.long)
+        if int(torch.unique(voxel_coords, dim=0).shape[0]) < MIN_PC0_NON_GROUND_VOXELS:
+            return False
+
+    return True
 
 
 # FIXME(Qingwen 2025-08-20): update more pretty here afterward!
-def collate_fn_pad(batch, point_cloud_range=None):
-    batch = [s for s in batch if _sample_is_usable(s, point_cloud_range=point_cloud_range)]
+def collate_fn_pad(batch, point_cloud_range=None, voxel_size=None):
+    batch = [s for s in batch
+             if _sample_is_usable(s, point_cloud_range=point_cloud_range, voxel_size=voxel_size)]
     if len(batch) == 0:
         return None
     batch_size_ = len(batch)
