@@ -36,25 +36,22 @@ def extract_flow_number(key):
         return digits[0]
     return '0'
 
-# Filter thresholds for keeping a sample in the batch. Both must pass.
-# Below these, the voxelizer in DynamicPillarFeatureNet can yield ≤1 unique voxel
-# across the whole batch, which crashes BatchNorm1d ("Expected more than 1 value
-# per channel when training"). The point-count check is a cheap early-out at
-# typical voxel sizes; the voxel-count check is the principled BN-safety floor
-# (matters most at coarser voxel_size where many points can cluster into one
-# voxel, e.g. a distant drone at voxel_size=0.4).
-MIN_PC0_NON_GROUND_POINTS = 50
-MIN_PC0_NON_GROUND_VOXELS = 2
+# Filter thresholds for keeping a sample in the batch. Both must pass for *every*
+# point-cloud frame in the sample (pc0, pc1, and any pchN), because the encoder
+# voxelizes each frame independently and runs the PFN on each — BN1d crashes if
+# *any* of them yields ≤1 unique voxel ("Expected more than 1 value per channel
+# when training"). The point-count check is a cheap early-out at typical voxel
+# sizes; the voxel-count check is the principled BN-safety floor (matters most
+# at coarser voxel_size where many points can cluster into one voxel, e.g. a
+# distant drone at voxel_size=0.4).
+MIN_FRAME_NON_GROUND_POINTS = 50
+MIN_FRAME_NON_GROUND_VOXELS = 2
 
 
-def _sample_is_usable(single_data, point_cloud_range=None, voxel_size=None):
-    if 'pc0' not in single_data or 'gm0' not in single_data:
-        return True
-    pc0 = single_data['pc0']
-    gm0 = single_data['gm0']
-    nonground = pc0[~gm0]
+def _frame_passes(pc, gm, point_cloud_range=None, voxel_size=None):
+    """Check whether one frame's non-ground in-range points clear the BN-safety floor."""
+    nonground = pc[~gm]
     if point_cloud_range is not None and nonground.numel() > 0:
-        # Use the same axis-aligned filter as Voxelization in the model.
         x_min, y_min, z_min, x_max, y_max, z_max = point_cloud_range
         xyz = nonground[:, :3]
         in_range = (
@@ -64,19 +61,33 @@ def _sample_is_usable(single_data, point_cloud_range=None, voxel_size=None):
         )
         nonground = nonground[in_range]
 
-    # Cheap point-count check first — catches the bulk of near-empty frames.
-    if int(nonground.shape[0]) < MIN_PC0_NON_GROUND_POINTS:
+    if int(nonground.shape[0]) < MIN_FRAME_NON_GROUND_POINTS:
         return False
 
-    # Voxel-count check — only meaningful when both voxel_size + point_cloud_range
-    # are plumbed through (otherwise we skip and rely on the point-count check).
     if voxel_size is not None and point_cloud_range is not None and nonground.numel() > 0:
         vs = torch.as_tensor(voxel_size, dtype=nonground.dtype, device=nonground.device)
         origin = torch.as_tensor(point_cloud_range[:3], dtype=nonground.dtype, device=nonground.device)
         voxel_coords = torch.floor((nonground[:, :3] - origin) / vs).to(torch.long)
-        if int(torch.unique(voxel_coords, dim=0).shape[0]) < MIN_PC0_NON_GROUND_VOXELS:
+        if int(torch.unique(voxel_coords, dim=0).shape[0]) < MIN_FRAME_NON_GROUND_VOXELS:
             return False
 
+    return True
+
+
+def _sample_is_usable(single_data, point_cloud_range=None, voxel_size=None):
+    # Iterate every point-cloud frame in the sample (pc0, pc1, pch1, …) that
+    # has a matching ground mask. The encoder voxelizes each independently, so
+    # any one of them with too few unique voxels will crash BN downstream.
+    for key in single_data.keys():
+        if not key.startswith('pc') or key.endswith('dynamic'):
+            continue
+        gm_key = f'gm{key[2:]}'
+        if gm_key not in single_data:
+            continue
+        if not _frame_passes(single_data[key], single_data[gm_key],
+                             point_cloud_range=point_cloud_range, voxel_size=voxel_size):
+            return False
+    # No pc/gm pairs found, or all frames passed — keep the sample.
     return True
 
 
