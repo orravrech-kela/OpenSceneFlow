@@ -6,6 +6,7 @@ defaults:
 slurm_id: 00000
 
 wandb_mode: online # [offline, disabled, online]
+wandb_log_model: false # upload checkpoints as wandb artifacts; off by default (~1.4GB/run, also avoids NaN-metadata crash on overfit runs)
 wandb_project_name: opensceneflow
 wandb_entity: orr-a-kelasys
 

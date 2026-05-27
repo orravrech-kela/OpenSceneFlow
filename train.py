@@ -121,7 +121,7 @@ def main(cfg):
                             project=f"{cfg.wandb_project_name}",
                             name=f"{cfg.output}",
                             offline=(cfg.wandb_mode == "offline"),
-                            log_model=(True if cfg.wandb_mode == "online" else False))
+                            log_model=(cfg.wandb_log_model and cfg.wandb_mode == "online"))
         logger.watch(model, log_graph=False)
     else:
         # check local tensorboard logging: tensorboard --logdir logs/jobs/{log folder}
