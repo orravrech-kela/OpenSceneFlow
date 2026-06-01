@@ -12,6 +12,8 @@ wandb_entity: orr-a-kelasys
 
 train_data: /home/kin/data/av2/h5py/demo/train
 train_aug: False # involved by deltaflow
+viz_train_aug: False # log PRE/POST-aug sample panels to wandb each epoch (rank-0, opt-in)
+viz_train_aug_samples: 4 # number of samples logged per epoch when viz_train_aug=True
 val_data: /home/kin/data/av2/h5py/demo/val
 
 output: ${model.name}-${slurm_id}
