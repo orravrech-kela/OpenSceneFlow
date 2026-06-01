@@ -45,6 +45,7 @@ seed: 42069
 log_every: 10 # steps epochs*dataset_size/batch_size
 val_every: 3 # epochs
 save_top_model: 5 # top_k model will be saved.
+eval_metric: innoviz # [av2, innoviz, both] which val/eval metrics to compute+log; innoviz = per-class x range EPE, no 35m cap
 
 # -----> Model and Task Parameters
 voxel_size: [0.2, 0.2, 6]

@@ -29,7 +29,7 @@ from src.lossfuncs import SSL_LOSSES_FN
 from src.utils.mics import weights_init, zip_res
 from src.utils.av2_eval import write_output_file
 from src.models.basic import cal_pose0to1, WarmupCosLR
-from src.utils.eval_metric import OfficialMetrics, evaluate_leaderboard, evaluate_leaderboard_v2, evaluate_ssf
+from src.utils.eval_metric import OfficialMetrics, evaluate_leaderboard, evaluate_leaderboard_v2, evaluate_ssf, evaluate_innoviz
 
 # debugging tools
 # import faulthandler
@@ -48,6 +48,7 @@ class ModelWrapper(LightningModule):
             "add_seloss": None,
             "checkpoint": None,
             "leaderboard_version": 2,
+            "eval_metric": "innoviz",  # [av2, innoviz, both]
             "supervised_flag": True,
             "save_res": False,
             "res_name": "default",
@@ -89,7 +90,7 @@ class ModelWrapper(LightningModule):
         self.cfg_loss_name = cfg.get("loss_fn", None)
         
         # ---> evaluation metric
-        self.metrics = OfficialMetrics()
+        self.metrics = OfficialMetrics(metric_set=self.eval_metric)
 
         # ---> inference mode
         if self.save_res and self.data_mode in ['val', 'valid', 'test']:
@@ -230,13 +231,18 @@ class ModelWrapper(LightningModule):
                 pose_flow = pose_flows[batch_id][valid_from_pc2res]
 
                 final_flow_ = pose_flow.clone() + res_dict['flow'][batch_id]
-                v1_dict= evaluate_leaderboard(final_flow_, pose_flow, batch['pc0'][batch_id][valid_from_pc2res], gt_flow[valid_from_pc2res], \
-                                           batch['flow_is_valid'][batch_id][valid_from_pc2res], batch['flow_category_indices'][batch_id][valid_from_pc2res])
-                v2_dict = evaluate_leaderboard_v2(final_flow_, pose_flow, batch['pc0'][batch_id][valid_from_pc2res], gt_flow[valid_from_pc2res], \
-                                        batch['flow_is_valid'][batch_id][valid_from_pc2res], batch['flow_category_indices'][batch_id][valid_from_pc2res])
-                ssf_dict = evaluate_ssf(final_flow_, pose_flow, batch['pc0'][batch_id][valid_from_pc2res], gt_flow[valid_from_pc2res], \
-                                        batch['flow_is_valid'][batch_id][valid_from_pc2res], batch['flow_category_indices'][batch_id][valid_from_pc2res])
-                self.metrics.step(v1_dict, v2_dict, ssf_dict)
+                is_valid_ = batch['flow_is_valid'][batch_id][valid_from_pc2res]
+                cat_idx_ = batch['flow_category_indices'][batch_id][valid_from_pc2res]
+                pc0_ = batch['pc0'][batch_id][valid_from_pc2res]
+                gt_flow_ = gt_flow[valid_from_pc2res]
+                v1_dict = v2_dict = ssf_dict = innoviz_dict = None
+                if self.eval_metric in ('av2', 'both'):
+                    v1_dict = evaluate_leaderboard(final_flow_, pose_flow, pc0_, gt_flow_, is_valid_, cat_idx_)
+                    v2_dict = evaluate_leaderboard_v2(final_flow_, pose_flow, pc0_, gt_flow_, is_valid_, cat_idx_)
+                    ssf_dict = evaluate_ssf(final_flow_, pose_flow, pc0_, gt_flow_, is_valid_, cat_idx_)
+                if self.eval_metric in ('innoviz', 'both'):
+                    innoviz_dict = evaluate_innoviz(final_flow_, pose_flow, pc0_, gt_flow_, is_valid_, cat_idx_)
+                self.metrics.step(v1_dict, v2_dict, ssf_dict, innoviz_dict)
         else:
             pass
 
@@ -296,12 +302,16 @@ curl -X POST https://sceneflow.argoverse.org/submissions/upload \\
         self.metrics.normalize()
 
         # wandb log things:
-        for key in self.metrics.bucketed:
-            for type_ in 'Static', 'Dynamic':
-                self.log(f"val/{type_}/{key}", self.metrics.bucketed[key][type_], sync_dist=True)
-        for key in self.metrics.epe_3way:
-            self.log(f"val/{key}", self.metrics.epe_3way[key], sync_dist=True)
-        
+        if self.eval_metric in ('av2', 'both'):
+            for key in self.metrics.bucketed:
+                for type_ in 'Static', 'Dynamic':
+                    self.log(f"val/{type_}/{key}", self.metrics.bucketed[key][type_], sync_dist=True)
+            for key in self.metrics.epe_3way:
+                self.log(f"val/{key}", self.metrics.epe_3way[key], sync_dist=True)
+        if self.eval_metric in ('innoviz', 'both'):
+            for key, val in self.metrics.innoviz_log_dict().items():
+                self.log(f"val/{key}", val, sync_dist=True)
+
         self.metrics.print()
 
         self.metrics = OfficialMetrics()
@@ -333,15 +343,20 @@ curl -X POST https://sceneflow.argoverse.org/submissions/upload \\
 
         if self.data_mode in ['val', 'valid']: # since only val we have ground truth flow to eval
             gt_flow = batch["flow"]
-            v1_dict = evaluate_leaderboard(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
-                                       gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], \
-                                       batch['flow_category_indices'][eval_mask])
-            v2_dict = evaluate_leaderboard_v2(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
-                                    gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], batch['flow_category_indices'][eval_mask])
-            ssf_dict = evaluate_ssf(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
-                                    gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], batch['flow_category_indices'][eval_mask])
-            
-            self.metrics.step(v1_dict, v2_dict, ssf_dict)
+            is_valid_ = batch['flow_is_valid'][eval_mask]
+            cat_idx_ = batch['flow_category_indices'][eval_mask]
+            v1_dict = v2_dict = ssf_dict = innoviz_dict = None
+            if self.eval_metric in ('av2', 'both'):
+                v1_dict = evaluate_leaderboard(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                           gt_flow[eval_mask], is_valid_, cat_idx_)
+                v2_dict = evaluate_leaderboard_v2(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                        gt_flow[eval_mask], is_valid_, cat_idx_)
+                ssf_dict = evaluate_ssf(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                        gt_flow[eval_mask], is_valid_, cat_idx_)
+            if self.eval_metric in ('innoviz', 'both'):
+                innoviz_dict = evaluate_innoviz(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                        gt_flow[eval_mask], is_valid_, cat_idx_)
+            self.metrics.step(v1_dict, v2_dict, ssf_dict, innoviz_dict)
             if self.save_res:
                 # write final_flow into the dataset.
                 key = str(batch['timestamp'])

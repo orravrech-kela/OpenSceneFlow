@@ -31,7 +31,7 @@ import shutil
 
 from .dataset import HDF5Dataset
 from .models.basic import cal_pose0to1
-from .utils.eval_metric import OfficialMetrics, evaluate_leaderboard, evaluate_leaderboard_v2, evaluate_ssf
+from .utils.eval_metric import OfficialMetrics, evaluate_leaderboard, evaluate_leaderboard_v2, evaluate_ssf, evaluate_innoviz
 from .utils.av2_eval import write_output_file
 from .utils.mics import zip_res
 from .utils import InlineTee
@@ -101,7 +101,7 @@ class InferenceRunner:
         self.mode = mode
 
         self.model.to(self.device)
-        self.metrics = OfficialMetrics() if self.mode in ['val', 'eval', 'valid'] else None
+        self.metrics = OfficialMetrics(metric_set=cfg.get('eval_metric', 'innoviz')) if self.mode in ['val', 'eval', 'valid'] else None
         self.res_name = cfg.get('res_name', cfg.model.name)
         self.save_res_path = cfg.get('save_res_path', None)
 
@@ -157,15 +157,21 @@ class InferenceRunner:
         if self.mode in ['val', 'eval', 'valid']:
             eval_mask = batch['eval_mask'].squeeze()
             gt_flow = batch["flow"]
-            v1_dict = evaluate_leaderboard(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
-                                       gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], \
-                                       batch['flow_category_indices'][eval_mask])
-            v2_dict = evaluate_leaderboard_v2(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask],
-                                                gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], 
-                                                batch['flow_category_indices'][eval_mask])
-            ssf_dict = evaluate_ssf(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
-                                    gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], batch['flow_category_indices'][eval_mask])
-            self.metrics.step(v1_dict, v2_dict, ssf_dict)
+            ms = self.metrics.metric_set
+            v1_dict = v2_dict = ssf_dict = innoviz_dict = None
+            if ms in ('av2', 'both'):
+                v1_dict = evaluate_leaderboard(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                           gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], \
+                                           batch['flow_category_indices'][eval_mask])
+                v2_dict = evaluate_leaderboard_v2(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask],
+                                                    gt_flow[eval_mask], batch['flow_is_valid'][eval_mask],
+                                                    batch['flow_category_indices'][eval_mask])
+                ssf_dict = evaluate_ssf(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                        gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], batch['flow_category_indices'][eval_mask])
+            if ms in ('innoviz', 'both'):
+                innoviz_dict = evaluate_innoviz(final_flow[eval_mask], pose_flow[eval_mask], pc0[eval_mask], \
+                                        gt_flow[eval_mask], batch['flow_is_valid'][eval_mask], batch['flow_category_indices'][eval_mask])
+            self.metrics.step(v1_dict, v2_dict, ssf_dict, innoviz_dict)
 
         elif self.mode == 'test':
             eval_mask = batch['eval_mask'].squeeze()
@@ -259,7 +265,7 @@ def _run_process(cfg, mode):
 
     if rank == 0:
         if mode in ['val', 'eval', 'valid']:
-            final_metrics = OfficialMetrics()
+            final_metrics = OfficialMetrics(metric_set=cfg.get('eval_metric', 'innoviz'))
             print(f"\n--- [LOG] Finished processing. Aggregating results from {world_size} GPUs with {len(gathered_metrics_objects)} metrics objects...")
             for metrics_obj in gathered_metrics_objects:
                 if metrics_obj is None: continue
@@ -287,8 +293,17 @@ def _run_process(cfg, mode):
                             final_metrics.distanceMatrix.accumulate_value(
                                 class_name, range_bucket, avg_epe, avg_range, count
                             )
+                for class_idx, class_name in enumerate(metrics_obj.innovizMatrix.class_names):
+                    for range_idx, range_bucket in enumerate(metrics_obj.innovizMatrix.range_buckets):
+                        count = metrics_obj.innovizMatrix.count_storage_matrix[class_idx, range_idx]
+                        if count > 0:
+                            avg_epe = metrics_obj.innovizMatrix.epe_storage_matrix[class_idx, range_idx]
+                            avg_range = metrics_obj.innovizMatrix.range_storage_matrix[class_idx, range_idx]
+                            final_metrics.innovizMatrix.accumulate_value(
+                                class_name, range_bucket, avg_epe, avg_range, count
+                            )
 
-            final_metrics.print() 
+            final_metrics.print()
         else:
             print(f"\nWe already write the {cfg.res_name} into the dataset, please run following commend to visualize the flow. Copy and paste it to your terminal:")
             print(f"python tools/visualization.py --res_name '{cfg.res_name}' --data_dir {cfg.dataset_path}")
