@@ -441,8 +441,10 @@ class TrainAugVizCallback(_Callback):
     def on_train_epoch_start(self, trainer, pl_module):
         if trainer.global_rank != 0 or (trainer.current_epoch % self.every_n_epochs) != 0:
             return
-        run = self._wandb_run(trainer)
-        if run is None:
+        logger = getattr(trainer, "logger", None)
+        # Use WandbLogger.log_image (no explicit step -> rides wandb's current step).
+        # Passing step=global_step here logs to a past step and wandb drops it.
+        if logger is None or type(logger).__name__ != "WandbLogger" or not hasattr(logger, "log_image"):
             return
         ds = self.dataset
         if ds is None:
@@ -458,11 +460,10 @@ class TrainAugVizCallback(_Callback):
             self._indices = pick_foreground_indices(ds, self.num_samples, self.seed, self.min_fg)
             ds.transform = saved
 
-        import wandb
         aug = ds.transform
-        # All samples under one key as a list -> a single wandb panel with an index
+        # All samples as a list under one key -> a single wandb panel with an index
         # slider, instead of one panel per sample.
-        images = []
+        imgs, caps = [], []
         for n, idx in enumerate(self._indices):
             saved = ds.transform; ds.transform = None
             raw = ds[idx]; ds.transform = saved
@@ -475,12 +476,5 @@ class TrainAugVizCallback(_Callback):
                 sample_to_column("PRE-AUG", "", pre),
                 sample_to_column("POST-AUG", aug_label(info), post),
             ], views=self.views, caption=cap)
-            images.append(wandb.Image(np.asarray(img), caption=cap))
-        run.log({"aug/samples": images}, step=trainer.global_step)
-
-    @staticmethod
-    def _wandb_run(trainer):
-        logger = getattr(trainer, "logger", None)
-        exp = getattr(logger, "experiment", None)
-        return exp if (exp is not None and hasattr(exp, "log")
-                       and type(logger).__name__ == "WandbLogger") else None
+            imgs.append(np.asarray(img)); caps.append(cap)
+        logger.log_image(key="aug/samples", images=imgs, caption=caps)
