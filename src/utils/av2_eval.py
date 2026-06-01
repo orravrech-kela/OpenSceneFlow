@@ -915,3 +915,46 @@ def compute_ssf_metrics(
             avg_dis = pc0_dis_[m_mask].mean()
             storage_error_matrix.append(BaseSplitValue(motion, epe, avg_dis, (min_range, max_range), count_pts))
     return storage_error_matrix
+
+# Innoviz-native: per-class x range-band x {static, dynamic} EPE. Unlike compute_ssf_metrics
+# this resolves category_indices through the Innoviz taxonomy (not AV2) and has no range cap.
+def compute_innoviz_metrics(
+    pc0_dis: NDArrayFloat,
+    pred_flow: NDArrayFloat,
+    gt_flow: NDArrayFloat,
+    category_indices: NDArrayInt,
+    is_valid: NDArrayBool,
+    dynamic_thresh: float = 0.05,
+    distance_split=(0, 50, 100, 200, np.inf),
+):
+    """Per-class, per-range, static/dynamic EPE for the Innoviz taxonomy.
+
+    pred_flow/gt_flow are expected non-rigid (ego motion already removed). A point is
+    dynamic if its non-rigid gt motion magnitude (per frame) >= dynamic_thresh.
+    """
+    from src.utils.innoviz_eval import INNOVIZ_CATEGORY_TO_INDEX
+
+    idx_to_name = {idx: ("background" if name == "NONE" else name)
+                   for name, idx in INNOVIZ_CATEGORY_TO_INDEX.items()}
+
+    storage_error_matrix = []
+    error_flow = np.linalg.norm(pred_flow - gt_flow, axis=-1)
+    gt_motion = np.linalg.norm(gt_flow, axis=-1)  # per-frame non-rigid magnitude
+    range_thresholds = list(zip(distance_split, distance_split[1:]))
+
+    for cls_idx in sorted(idx_to_name):
+        cls_name = idx_to_name[cls_idx]
+        cat_mask = category_indices == cls_idx
+        for min_range, max_range in range_thresholds:
+            base = cat_mask & (pc0_dis >= min_range) & (pc0_dis < max_range) & is_valid
+            dynamic_mask = base & (gt_motion >= dynamic_thresh)
+            for motion, m_mask in [("Dynamic", dynamic_mask), ("Static", base & ~(gt_motion >= dynamic_thresh))]:
+                count_pts = int(m_mask.sum())
+                if count_pts == 0:
+                    continue
+                epe = error_flow[m_mask].mean()
+                avg_dis = pc0_dis[m_mask].mean()
+                storage_error_matrix.append(
+                    BaseSplitValue(f"{cls_name}/{motion}", epe, avg_dis, (min_range, max_range), count_pts)
+                )
+    return storage_error_matrix

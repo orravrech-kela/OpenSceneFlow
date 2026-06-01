@@ -5,6 +5,7 @@ data_mode: val # [val, test]
 save_res: False # [True, False]
 
 leaderboard_version: 1 # [1, 2]
+eval_metric: innoviz # [av2, innoviz, both]
 supervised_flag: True # [True, False], whether you use any label from the dataset
 
 # no need to change

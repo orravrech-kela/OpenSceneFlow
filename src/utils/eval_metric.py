@@ -18,7 +18,7 @@ from tabulate import tabulate
 
 BASE_DIR = os.path.abspath(os.path.join( os.path.dirname( __file__ ), '../..' ))
 sys.path.append(BASE_DIR)
-from src.utils.av2_eval import compute_metrics, compute_bucketed_epe, compute_ssf_metrics, CLOSE_DISTANCE_THRESHOLD
+from src.utils.av2_eval import compute_metrics, compute_bucketed_epe, compute_ssf_metrics, compute_innoviz_metrics, CLOSE_DISTANCE_THRESHOLD
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=RuntimeWarning)
@@ -101,6 +101,32 @@ def evaluate_ssf(est_flow, rigid_flow, pc0, gt_flow, is_valid, pts_ids):
         est_flow.detach().cpu().numpy().astype(float),
         gt_flow.detach().cpu().numpy().astype(float),
         is_valid.detach().cpu().numpy().astype(bool),
+    )
+    return res_dict
+
+# EPE Innoviz: per-class (vehicle/person/drone/animal) x range-band x static/dynamic, full range.
+INNOVIZ_DISTANCE_SPLIT = [0, 50, 100, 200, np.inf]
+INNOVIZ_DYNAMIC_THRESH = 0.05  # m/frame on non-rigid gt motion
+def evaluate_innoviz(est_flow, rigid_flow, pc0, gt_flow, is_valid, pts_ids):
+    pc_distance = torch.linalg.vector_norm(pc0[:, :3], dim=-1)
+    mask_flow_non_nan = ~est_flow.isnan().any(dim=1) & ~rigid_flow.isnan().any(dim=1) & ~pc0[:, :3].isnan().any(dim=1) & ~gt_flow.isnan().any(dim=1)
+    mask_eval = mask_flow_non_nan & ~is_valid.isnan() & ~pts_ids.isnan()
+    rigid_flow = rigid_flow[mask_eval, :]
+    # remove ego motion: evaluate non-rigid (object) flow only, like the v2/ssf metrics
+    est_flow = est_flow[mask_eval, :] - rigid_flow
+    gt_flow = gt_flow[mask_eval, :] - rigid_flow
+    is_valid = is_valid[mask_eval]
+    pc_distance = pc_distance[mask_eval]
+    pts_ids = pts_ids[mask_eval]
+
+    res_dict = compute_innoviz_metrics(
+        pc_distance.detach().cpu().numpy().astype(float),
+        est_flow.detach().cpu().numpy().astype(float),
+        gt_flow.detach().cpu().numpy().astype(float),
+        pts_ids.detach().cpu().numpy().astype(np.int64),
+        is_valid.detach().cpu().numpy().astype(bool),
+        dynamic_thresh=INNOVIZ_DYNAMIC_THRESH,
+        distance_split=INNOVIZ_DISTANCE_SPLIT,
     )
     return res_dict
 
@@ -238,7 +264,10 @@ class BucketedSpeedMatrix(BucketResultMatrix):
         return OverallError(average_static_epe, average_dynamic_error)
 
 class OfficialMetrics:
-    def __init__(self):
+    def __init__(self, metric_set='innoviz'):
+        # metric_set: 'av2' (leaderboard 3-way/bucketed/ssf), 'innoviz' (per-class x range),
+        # or 'both'. Gates which evaluators are accumulated, normalized, logged and printed.
+        self.metric_set = metric_set
         # same with BUCKETED_METACATAGORIES
         self.bucketed= {
             'BACKGROUND': {'Static': [], 'Dynamic': []},
@@ -278,22 +307,44 @@ class OfficialMetrics:
             str_name = f"{int(min_)}-{int(max_)}" if max_ != np.inf else f"{int(min_)}-inf"
             self.epe_ssf[str_name] = {"Static": [], "Dynamic": [], "#Static": 0, "#Dynamic": 0}
 
-    def step(self, epe_dict, bucket_dict, ssf_dict=None):
+        # innoviz per-class x range x {static, dynamic}. Flatten class/motion into the
+        # matrix row axis so we can reuse BucketResultMatrix; columns are range bands.
+        self.innoviz_classes = ['background', 'vehicle', 'person', 'drone', 'animal']
+        self.innoviz_distance_split = INNOVIZ_DISTANCE_SPLIT
+        innoviz_rows = [f"{c}/{m}" for c in self.innoviz_classes for m in ('Static', 'Dynamic')]
+        self.innovizMatrix = BucketResultMatrix(
+            class_names=innoviz_rows,
+            range_buckets=list(zip(self.innoviz_distance_split, self.innoviz_distance_split[1:])),
+        )
+
+    def step(self, epe_dict=None, bucket_dict=None, ssf_dict=None, innoviz_dict=None):
         """
         This step function is used to store the results of **each frame**.
         """
-        for key in epe_dict:
-            self.epe_3way[key].append(epe_dict[key])
+        if epe_dict is not None:
+            for key in epe_dict:
+                self.epe_3way[key].append(epe_dict[key])
 
-        for item_ in bucket_dict:
-            self.bucketedMatrix.accumulate_value(
-                item_.name,
-                item_.thresholds_range,
-                item_.avg_epe,
-                item_.avg_range,
-                item_.count,
-            )
-        
+        if bucket_dict is not None:
+            for item_ in bucket_dict:
+                self.bucketedMatrix.accumulate_value(
+                    item_.name,
+                    item_.thresholds_range,
+                    item_.avg_epe,
+                    item_.avg_range,
+                    item_.count,
+                )
+
+        if innoviz_dict is not None:
+            for item_ in innoviz_dict:
+                self.innovizMatrix.accumulate_value(
+                    item_.name,
+                    item_.thresholds_range,
+                    item_.avg_epe,
+                    item_.avg_range,
+                    item_.count,
+                )
+
         if ssf_dict is not None:
             # print("ssf_dict is not None")
             for item_ in ssf_dict:
@@ -308,6 +359,10 @@ class OfficialMetrics:
         """
         This normalize mean average results between **frame and frame**.
         """
+        if self.metric_set == 'innoviz':
+            # innovizMatrix already holds running weighted-average EPE per cell; nothing to do.
+            self.norm_flag = True
+            return
         # epe 3-way evaluation
         for key in self.epe_3way:
             self.epe_3way[key] = np.mean(self.epe_3way[key])
@@ -342,24 +397,73 @@ class OfficialMetrics:
             
             self.epe_ssf['Mean'][motion] = np.nanmean(avg_epes)
 
+    def _band_headers(self):
+        return [f"{int(a)}-{int(b)}m" if b != np.inf else f"{int(a)}+m"
+                for a, b in self.innovizMatrix.range_buckets]
+
+    def print_innoviz(self):
+        headers = ["Class"] + self._band_headers()
+        for motion in ('Dynamic', 'Static'):
+            printed_data = []
+            for cls in self.innoviz_classes:
+                epe, _rng, cnt = self.innovizMatrix.get_class_entries(f"{cls}/{motion}")
+                row = [cls]
+                for e, n in zip(epe, cnt):
+                    row.append(f"{e:.4f} (n={int(n)})" if n > 0 and not np.isnan(e) else "-")
+                printed_data.append(row)
+            print(f"Innoviz per-class EPE [{motion}] (m, non-rigid; dynamic >= {INNOVIZ_DYNAMIC_THRESH}m/frame):")
+            print(tabulate(printed_data, headers=headers, tablefmt='orgtbl'), "\n")
+
+    def innoviz_log_dict(self):
+        """Flat {metric_key: epe} for wandb. Per (class, motion, band) cell, a
+        count-weighted overall per (class, motion), and foreground aggregates.
+        'innoviz/Mean' is always emitted (NaN if no foreground) so it can be a
+        stable ModelCheckpoint monitor. Empty cells are omitted."""
+        out = {}
+        bands = self._band_headers()
+        fg_epe, fg_cnt = [], []          # foreground (non-background), both motions
+        fg_dyn_epe, fg_dyn_cnt = [], []  # foreground dynamic only
+        for cls in self.innoviz_classes:
+            for motion in ('Static', 'Dynamic'):
+                epe, _rng, cnt = self.innovizMatrix.get_class_entries(f"{cls}/{motion}")
+                valid = (cnt > 0) & ~np.isnan(epe)
+                for e, n, band in zip(epe, cnt, bands):
+                    if n > 0 and not np.isnan(e):
+                        out[f"innoviz/{cls}/{motion}/{band}"] = float(e)
+                if valid.any():
+                    out[f"innoviz/{cls}/{motion}"] = float(np.average(epe[valid], weights=cnt[valid]))
+                    if cls != 'background':
+                        fg_epe.extend(epe[valid]); fg_cnt.extend(cnt[valid])
+                        if motion == 'Dynamic':
+                            fg_dyn_epe.extend(epe[valid]); fg_dyn_cnt.extend(cnt[valid])
+        out['innoviz/Mean'] = float(np.average(fg_epe, weights=fg_cnt)) if fg_cnt else float('nan')
+        if fg_dyn_cnt:
+            out['innoviz/Dynamic/Mean'] = float(np.average(fg_dyn_epe, weights=fg_dyn_cnt))
+        return out
+
     def print(self, ssf_metrics: bool = False):
         if not self.norm_flag:
             self.normalize()
-        printed_data = []
-        for key in self.epe_3way:
-            printed_data.append([key,self.epe_3way[key]])
-        print("Version 1 Metric on EPE Three-way:")
-        print(tabulate(printed_data), "\n")
 
-        printed_data = []
-        for key in self.bucketed:
-            printed_data.append([key, self.bucketed[key]['Static'], self.bucketed[key]['Dynamic']])
-        print("Version 2 Metric on Normalized Category-based:")
-        print(tabulate(printed_data, headers=["Class", "Static", "Dynamic"], tablefmt='orgtbl'), "\n")
-
-        if ssf_metrics:
+        if self.metric_set in ('av2', 'both'):
             printed_data = []
-            for key in self.epe_ssf:
-                printed_data.append([key, np.around(self.epe_ssf[key]['Static'],4), np.around(self.epe_ssf[key]['Dynamic'],4), self.epe_ssf[key]["#Static"], self.epe_ssf[key]["#Dynamic"]])
-            print("Version 3 Metric on EPE Distance-based:")
-            print(tabulate(printed_data, headers=["Distance", "Static", "Dynamic", "#Static", "#Dynamic"], tablefmt='orgtbl'), "\n")
+            for key in self.epe_3way:
+                printed_data.append([key,self.epe_3way[key]])
+            print("Version 1 Metric on EPE Three-way:")
+            print(tabulate(printed_data), "\n")
+
+            printed_data = []
+            for key in self.bucketed:
+                printed_data.append([key, self.bucketed[key]['Static'], self.bucketed[key]['Dynamic']])
+            print("Version 2 Metric on Normalized Category-based:")
+            print(tabulate(printed_data, headers=["Class", "Static", "Dynamic"], tablefmt='orgtbl'), "\n")
+
+            if ssf_metrics:
+                printed_data = []
+                for key in self.epe_ssf:
+                    printed_data.append([key, np.around(self.epe_ssf[key]['Static'],4), np.around(self.epe_ssf[key]['Dynamic'],4), self.epe_ssf[key]["#Static"], self.epe_ssf[key]["#Dynamic"]])
+                print("Version 3 Metric on EPE Distance-based:")
+                print(tabulate(printed_data, headers=["Distance", "Static", "Dynamic", "#Static", "#Dynamic"], tablefmt='orgtbl'), "\n")
+
+        if self.metric_set in ('innoviz', 'both'):
+            self.print_innoviz()
