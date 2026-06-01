@@ -132,6 +132,7 @@ def main() -> int:
             import wandb
             wandb_run.log({"aug/showcase": wandb.Image(str(p))})
 
+    wandb_images = []
     for n, idx in enumerate(indices):
         np.random.seed(args.seed + idx)
         raw = ds[idx]
@@ -158,9 +159,11 @@ def main() -> int:
         print(f"  wrote {p.name}  ({img.width}x{img.height})  {aug_label(info)}")
         if wandb_run is not None:
             import wandb
-            wandb_run.log({f"aug/sample_{n:02d}": wandb.Image(str(p))})
+            wandb_images.append(wandb.Image(str(p), caption=f"#{n} {cap}"))
 
     if wandb_run is not None:
+        if wandb_images:
+            wandb_run.log({"aug/samples": wandb_images})  # one panel, index slider
         wandb_run.finish()
     print(f"Done -> {out_dir}")
     return 0

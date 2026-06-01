@@ -458,23 +458,25 @@ class TrainAugVizCallback(_Callback):
             self._indices = pick_foreground_indices(ds, self.num_samples, self.seed, self.min_fg)
             ds.transform = saved
 
+        import wandb
         aug = ds.transform
-        logs = {}
+        # All samples under one key as a list -> a single wandb panel with an index
+        # slider, instead of one panel per sample.
+        images = []
         for n, idx in enumerate(self._indices):
             saved = ds.transform; ds.transform = None
             raw = ds[idx]; ds.transform = saved
             pre = copy.deepcopy(raw)
             post = aug(copy.deepcopy(raw)) if aug is not None else raw
             info = decode_aug(pre["pc0"][:, :3], post["pc0"][:, :3])
-            cap = (f"epoch {trainer.current_epoch}  |  {split_frame(raw['scene_id'], raw['timestamp'])}"
-                   f"  |  POST: {aug_label(info)}")
+            cap = (f"#{n} epoch {trainer.current_epoch} | {split_frame(raw['scene_id'], raw['timestamp'])}"
+                   f" | POST: {aug_label(info)}")
             img = render_columns(self._renderer, [
                 sample_to_column("PRE-AUG", "", pre),
                 sample_to_column("POST-AUG", aug_label(info), post),
             ], views=self.views, caption=cap)
-            import wandb
-            logs[f"aug/sample_{n:02d}"] = wandb.Image(np.asarray(img))
-        run.log(logs, step=trainer.global_step)
+            images.append(wandb.Image(np.asarray(img), caption=cap))
+        run.log({"aug/samples": images}, step=trainer.global_step)
 
     @staticmethod
     def _wandb_run(trainer):
