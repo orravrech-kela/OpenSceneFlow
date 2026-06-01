@@ -118,6 +118,13 @@ def main(cfg):
         LearningRateMonitor(logging_interval="epoch")
     ]
 
+    # opt-in: log PRE/POST training-augmentation panels to wandb each epoch (rank-0).
+    if cfg.get('viz_train_aug', False) and cfg.wandb_mode != "disabled":
+        from src.utils.aug_viz import TrainAugVizCallback
+        callbacks.append(TrainAugVizCallback(num_samples=cfg.get('viz_train_aug_samples', 4),
+                                             every_n_epochs=cfg.val_every,
+                                             dataset=train_dataset))
+
     if cfg.wandb_mode != "disabled":
         logger = WandbLogger(save_dir=output_dir,
                             entity=cfg.wandb_entity,
