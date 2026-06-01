@@ -102,12 +102,15 @@ def main(cfg):
     cfg = DictConfig(OmegaConf.to_container(cfg, resolve=True))
     model = ModelWrapper(cfg)
 
+    # innoviz metric set doesn't log the AV2 val_monitor key (e.g. val/Dynamic/Mean);
+    # monitor the foreground-EPE aggregate instead.
+    val_monitor = 'val/innoviz/Mean' if cfg.get('eval_metric', 'innoviz') == 'innoviz' else cfg.model.val_monitor
     callbacks = [
         ModelCheckpoint(
             dirpath=os.path.join(output_dir, "checkpoints"),
             filename="{epoch:02d}_"+method_name,
             auto_insert_metric_name=False,
-            monitor=cfg.model.val_monitor,
+            monitor=val_monitor,
             mode="min",
             save_top_k=cfg.save_top_model,
             save_last=True,
@@ -139,6 +142,8 @@ def main(cfg):
                          max_epochs=cfg.epochs,
                          sync_batchnorm=cfg.sync_bn,
                          overfit_batches=cfg.overfit_batches,
+                         limit_train_batches=cfg.get('limit_train_batches', 1.0),
+                         limit_val_batches=cfg.get('limit_val_batches', 1.0),
                          fast_dev_run=cfg.fast_dev_run)
     
     

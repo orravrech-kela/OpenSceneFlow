@@ -415,10 +415,14 @@ class OfficialMetrics:
             print(tabulate(printed_data, headers=headers, tablefmt='orgtbl'), "\n")
 
     def innoviz_log_dict(self):
-        """Flat {metric_key: epe} for wandb. Per (class, motion, band) cell plus a
-        count-weighted overall per (class, motion). Empty cells are omitted."""
+        """Flat {metric_key: epe} for wandb. Per (class, motion, band) cell, a
+        count-weighted overall per (class, motion), and foreground aggregates.
+        'innoviz/Mean' is always emitted (NaN if no foreground) so it can be a
+        stable ModelCheckpoint monitor. Empty cells are omitted."""
         out = {}
         bands = self._band_headers()
+        fg_epe, fg_cnt = [], []          # foreground (non-background), both motions
+        fg_dyn_epe, fg_dyn_cnt = [], []  # foreground dynamic only
         for cls in self.innoviz_classes:
             for motion in ('Static', 'Dynamic'):
                 epe, _rng, cnt = self.innovizMatrix.get_class_entries(f"{cls}/{motion}")
@@ -428,6 +432,13 @@ class OfficialMetrics:
                         out[f"innoviz/{cls}/{motion}/{band}"] = float(e)
                 if valid.any():
                     out[f"innoviz/{cls}/{motion}"] = float(np.average(epe[valid], weights=cnt[valid]))
+                    if cls != 'background':
+                        fg_epe.extend(epe[valid]); fg_cnt.extend(cnt[valid])
+                        if motion == 'Dynamic':
+                            fg_dyn_epe.extend(epe[valid]); fg_dyn_cnt.extend(cnt[valid])
+        out['innoviz/Mean'] = float(np.average(fg_epe, weights=fg_cnt)) if fg_cnt else float('nan')
+        if fg_dyn_cnt:
+            out['innoviz/Dynamic/Mean'] = float(np.average(fg_dyn_epe, weights=fg_dyn_cnt))
         return out
 
     def print(self, ssf_metrics: bool = False):
