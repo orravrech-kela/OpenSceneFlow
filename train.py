@@ -59,7 +59,7 @@ def main(cfg):
     precheck_cfg_valid(cfg)
     pl.seed_everything(cfg.seed, workers=True)
 
-    train_aug = transforms.Compose([RandomHeight(p=0.8), RandomFlip(p=0.2), RandomJitter(), ToTensor()] if cfg.get('train_aug', False) else [ToTensor()])
+    train_aug = transforms.Compose([RandomHeight(p=0.8), RandomFlip(px=cfg.get('aug_flip_x_prob', 0.0), py=cfg.get('aug_flip_y_prob', 0.2)), RandomJitter(), ToTensor()] if cfg.get('train_aug', False) else [ToTensor()])
     train_dataset = HDF5Dataset(cfg.train_data, 
                     n_frames=cfg.num_frames,
                     ssl_label=cfg.get('ssl_label', None),

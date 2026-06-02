@@ -176,14 +176,17 @@ class RandomJitter(object):
         return data_dict
 
 class RandomFlip(object):
-    def __init__(self, p=0.5, verbose=False):
-        """p: probability of flipping"""
-        self.p = p
+    def __init__(self, p=None, px=0.0, py=0.2, verbose=False):
+        """px/py: prob of flipping along x (front/back) / y (left/right). p sets both (legacy)."""
+        if p is not None:
+            px = py = p
+        self.px = px
+        self.py = py
         self.verbose = verbose
 
     def __call__(self, data_dict):
-        flip_x = np.random.rand() < self.p
-        flip_y = np.random.rand() < self.p
+        flip_x = np.random.rand() < self.px
+        flip_y = np.random.rand() < self.py
 
         # If no flip, return directly
         if not (flip_x or flip_y):
