@@ -136,6 +136,32 @@ def write_outputs(out_dir: Path, per_frame: dict) -> None:
     with (out_dir / "tracks.json").open("w") as f:
         json.dump(summary, f, indent=1)
 
+    _write_viewer_detections(out_dir, per_frame)
+
+
+def _write_viewer_detections(out_dir: Path, per_frame: dict) -> None:
+    """Write detections.json compatible with offline_viewer.py --detections."""
+    results = []
+    for rid, dets in per_frame.items():
+        frame_dets = []
+        for d in dets:
+            cx, cy, cz, l, w, h, yaw = d.box
+            frame_dets.append({
+                "class_name": "mover",
+                "score": 1.0,
+                "x": round(float(cx), 4),
+                "y": round(float(cy), 4),
+                "z": round(float(cz), 4),
+                "dx": round(float(l), 4),
+                "dy": round(float(w), 4),
+                "dz": round(float(h), 4),
+                "heading": round(float(yaw), 4),
+                "track_id": str(d.track_id),
+            })
+        results.append({"frame_id": rid, "frame_idx": int(rid), "detections": frame_dets})
+    with (out_dir / "detections.json").open("w") as f:
+        json.dump({"results": results}, f, indent=1)
+
 
 def render_video(args, ids, per_frame, out_dir) -> None:
     import cv2

@@ -6,8 +6,10 @@ Mirrors the offscreen pattern in ``dataprocess/viz_ground_coverage.py``.
 from __future__ import annotations
 
 import os
+import sys
 
-os.environ.setdefault("EGL_PLATFORM", "surfaceless")
+if sys.platform != "darwin":
+    os.environ.setdefault("EGL_PLATFORM", "surfaceless")
 
 from typing import List, Optional, Tuple
 
