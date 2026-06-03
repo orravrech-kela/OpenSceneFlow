@@ -26,7 +26,7 @@ PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(PARENT_DIR)
 
 from src.motion.detect import Detection, detect_frame  # noqa: E402
-from src.motion.frontend import list_frame_ids, load_candidates  # noqa: E402
+from src.motion.loader import list_frame_ids, load_candidates  # noqa: E402
 from src.motion.track import Tracker  # noqa: E402
 
 
