@@ -13,8 +13,8 @@
 
 import torch
 from torch.utils.data import DataLoader
-import lightning.pytorch as pl
-from lightning.pytorch.loggers import TensorBoardLogger
+import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger
 from omegaconf import DictConfig, OmegaConf
 import hydra, wandb, os, sys
 from hydra.core.hydra_config import HydraConfig
