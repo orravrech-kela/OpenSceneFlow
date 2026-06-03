@@ -3,12 +3,13 @@
 Pipeline: candidate motion mask -> temporal accumulation -> 3D DBSCAN ->
 oriented box -> flow-guided tracking with a net-displacement gate.
 
-Outputs per-frame detections (JSON + npz) and, with --viz, a top-down mp4.
+Outputs per-frame detections (JSON + npz). Load detections.json in
+offline_viewer.py with --detections for visualization.
 
 Example:
     .venv/bin/python tools/detect_track_movers.py \\
         --seq /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint \\
-        --pred-subdir pred_flow_deltaflow5f --viz --limit 120
+        --pred-subdir pred_flow_deltaflow5f --limit 120
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(PARENT_DIR)
 
 from src.motion.detect import Detection, detect_frame  # noqa: E402
-from src.motion.frontend import list_frame_ids, load_candidates, load_full_cloud  # noqa: E402
+from src.motion.frontend import list_frame_ids, load_candidates  # noqa: E402
 from src.motion.track import Tracker  # noqa: E402
 
 
@@ -49,15 +50,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--min-hits", type=int, default=3)
     ap.add_argument("--max-misses", type=int, default=4)
     ap.add_argument("--disp-gate", type=float, default=0.5, help="net translation (m) before a track is emitted")
-    # run / viz
+    # run
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="0 = all frames")
-    ap.add_argument("--viz", action="store_true")
-    ap.add_argument("--follow", action="store_true", help="per-frame follow cam instead of a fixed view")
-    ap.add_argument("--view-half", type=float, default=18.0, help="follow-cam half-extent (m)")
-    ap.add_argument("--fps", type=int, default=10)
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=960)
     return ap.parse_args()
 
 
@@ -74,7 +69,6 @@ def main() -> int:
     sel = ids[args.start:]
     if args.limit > 0:
         sel = sel[: args.limit]
-    sel_set = {i for i in range(args.start, args.start + len(sel))}
     print(f"[info] {len(ids)} frames; processing {len(sel)} ({sel[0]}..{sel[-1]})", flush=True)
 
     # Candidate points are cheap (only moving pixels) -> preload for window access.
@@ -111,9 +105,6 @@ def main() -> int:
     write_outputs(out_dir, per_frame)
     n_tracks = len({d.track_id for ds in per_frame.values() for d in ds})
     print(f"[done] {n_emitted} detections across {n_tracks} tracks -> {out_dir}", flush=True)
-
-    if args.viz:
-        render_video(args, ids, per_frame, out_dir)
     return 0
 
 
@@ -161,37 +152,6 @@ def _write_viewer_detections(out_dir: Path, per_frame: dict) -> None:
         results.append({"frame_id": rid, "frame_idx": int(rid), "detections": frame_dets})
     with (out_dir / "detections.json").open("w") as f:
         json.dump({"results": results}, f, indent=1)
-
-
-def render_video(args, ids, per_frame, out_dir) -> None:
-    import cv2
-    from src.motion.render import MoverRenderer, fit_topdown_camera, follow_camera
-
-    centers = np.array([d.box[:3] for ds in per_frame.values() for d in ds]).reshape(-1, 3)
-    fixed_cam = fit_topdown_camera(centers)
-    renderer = MoverRenderer(args.width, args.height)
-    out_mp4 = out_dir / "movers.mp4"
-    vw = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"),
-                         args.fps, (args.width, args.height))
-    sel = ids[args.start: args.start + (args.limit or len(ids))]
-    last_center = np.median(centers, axis=0) if centers.shape[0] else np.array([30.0, 0.0, 0.0])
-    for rid in sel:
-        cloud = load_full_cloud(args.seq, rid)
-        dets = per_frame.get(rid, [])
-        if args.follow:
-            if dets:
-                last_center = max(dets, key=lambda d: d.points.shape[0]).box[:3]
-            camera = follow_camera(last_center, half=args.view_half)
-        else:
-            camera = fixed_cam
-        rgb = renderer.render(cloud, dets, camera)
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        n = len(per_frame.get(rid, []))
-        cv2.putText(bgr, f"{rid}  objects={n}", (12, 34),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
-        vw.write(bgr)
-    vw.release()
-    print(f"[viz] {out_mp4}", flush=True)
 
 
 if __name__ == "__main__":
