@@ -33,3 +33,4 @@ data
 
 # Per-operator Innoviz split file — copy from innoviz_splits.example.yaml.
 /conf/innoviz_splits.yaml
+/conf/pbench_splits.yaml

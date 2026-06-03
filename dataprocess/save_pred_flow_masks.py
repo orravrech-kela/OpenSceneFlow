@@ -53,6 +53,7 @@ def process_sequence(
     frame_period_ns: int,
     has_flow_threshold: float,
     overwrite: bool,
+    no_annotations: bool = False,
 ) -> str:
     """Project ``f[<ts>][res_name]`` into a (H, W, 3) polar grid per frame."""
     if not seq_dir.is_dir():
@@ -65,9 +66,9 @@ def process_sequence(
         unit_vec = lut_npz["unit_vec"].astype(np.float32)
     H, W = unit_vec.shape[:2]
 
-    frame_pairs = _enumerate_frames(seq_dir)
+    frame_pairs = _enumerate_frames(seq_dir, no_annotations=no_annotations)
     if not frame_pairs:
-        return f"skip {seq_dir.name}: no polar frames listed in annotations"
+        return f"skip {seq_dir.name}: no polar frames found"
 
     out_dir = seq_dir / subdir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +130,7 @@ def _worker(args: dict) -> str:
         frame_period_ns=args["frame_period_ns"],
         has_flow_threshold=args["has_flow_threshold"],
         overwrite=args["overwrite"],
+        no_annotations=args["no_annotations"],
     )
 
 
@@ -161,6 +163,7 @@ def main(
     has_flow_threshold: float = 0.05,
     overwrite: bool = False,
     num_workers: int = 1,
+    no_annotations: bool = False,
 ):
     """CLI entry point. See module docstring for example invocation.
 
@@ -190,6 +193,7 @@ def main(
             frame_period_ns=frame_period_ns,
             has_flow_threshold=has_flow_threshold,
             overwrite=overwrite,
+            no_annotations=no_annotations,
         )
         for sd in seq_dirs
     ]
