@@ -336,6 +336,30 @@ uv run python offline_viewer.py \
   --flow-dir    /mnt/data/lidar/processed/gan_shomron_27_11_2025/sprint/flow
 ```
 
+#### Inference only (no annotations)
+
+To predict flow on sequences that have no annotations, pass `--no_annotations`
+to the extractor: frames are enumerated straight from `polar/*.npz` and only
+`lidar`/`pose`/`ground_mask`/`ego_motion` are written (no flow labels, only
+`index_total.pkl`). `save.py` restores `voxel_size`/`point_cloud_range`/
+`num_frames` from the checkpoint, so no overrides are needed. Pass the same
+`--no_annotations` to `save_pred_flow_masks.py` so step 3 enumerates frames the
+same way.
+
+```bash
+# 1. extract polar npz -> H5 (no labels)
+python dataprocess/extract_innoviz.py --splits_file conf/innoviz_splits.yaml \
+  --data_root /mnt/data/lidar/pbench --output_dir /mnt/data/lidar/h5/pbench \
+  --split val --no_annotations=True
+# 2. inference -> writes f[ts][res_name] into each H5
+python save.py model=deltaflow checkpoint=model_zoo/deltaflow-waymo.ckpt \
+  dataset_path=/mnt/data/lidar/h5/pbench/val res_name=deltaflow_waymo
+# 3. project predictions -> per-frame polar npz sidecars
+python dataprocess/save_pred_flow_masks.py --data_root /mnt/data/lidar/pbench \
+  --sequences palmam_test/car --h5_path /mnt/data/lidar/h5/pbench/val/palmam_test__car.h5 \
+  --res_name deltaflow_waymo --subdir pred_flow --no_annotations=True
+```
+
 To fine-tune DeltaFlow from a Waymo- or AV2-pretrained checkpoint (loaded
 non-strict via `cfg.pretrained_weights`, **not** `cfg.checkpoint`):
 

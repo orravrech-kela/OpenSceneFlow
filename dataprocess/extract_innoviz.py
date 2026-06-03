@@ -255,12 +255,35 @@ def _parse_annotations(
     return tracks, max_frame
 
 
-def _enumerate_frames(seq_dir: Path) -> List[Tuple[int, str]]:
+def _enumerate_polar_frames(seq_dir: Path) -> List[Tuple[int, str]]:
+    """Enumerate frames straight from ``polar/*.npz`` (inference, no annotations).
+
+    ``frame_idx = int(stem)`` so timestamps stay ordered; gaps in the polar
+    numbering are fine — the dataset pairs index-consecutive frames, not by
+    timestamp arithmetic.
+    """
+    polar_dir = seq_dir / "polar"
+    pairs: List[Tuple[int, str]] = []
+    for p in polar_dir.glob("*.npz"):
+        try:
+            pairs.append((int(p.stem), p.stem))
+        except ValueError:
+            continue
+    if not pairs:
+        raise RuntimeError(f"No numeric-stem polar npz found under {polar_dir}")
+    pairs.sort(key=lambda p: p[0])
+    return pairs
+
+
+def _enumerate_frames(seq_dir: Path, no_annotations: bool = False) -> List[Tuple[int, str]]:
     """Discover available polar frames; returns sorted ``(frame_idx, raw_id)`` pairs.
 
     ``frame_idx`` is the polar-file integer (= ``attr.frame`` in annotations),
     used as the HDF5 group name basis via ``frame_idx * frame_period_ns``.
     ``raw_id`` is the polar filename stem (e.g. ``"00007321"``).
+
+    With ``no_annotations`` the annotation file is skipped entirely and frames
+    come from ``polar/*.npz`` via :func:`_enumerate_polar_frames`.
 
     Annotations must use polar-file numbering: ``id`` parses to an integer
     matching a polar stem. If you have a 0-based serial export from CVAT,
@@ -271,6 +294,8 @@ def _enumerate_frames(seq_dir: Path) -> List[Tuple[int, str]]:
     here masked real corruption (e.g. duplicate polar-frame extraction when
     the id range overlapped polar but was offset).
     """
+    if no_annotations:
+        return _enumerate_polar_frames(seq_dir)
     annotations_path = _annotations_path(seq_dir)
     with open(annotations_path) as f:
         data = json.load(f)
@@ -412,7 +437,7 @@ def _create_group_data(
 
 def process_sequence(
     day: str,
-    seq: str,
+    seq: Optional[str],
     data_root: Path,
     output_dir: Path,
     ground_config: str,
@@ -422,13 +447,19 @@ def process_sequence(
     max_frames: Optional[int] = None,
     auto_height: bool = True,
     height_override: Optional[float] = None,
+    no_annotations: bool = False,
 ) -> str:
-    """Convert one Innoviz sequence into a single `<scene_id>.h5` file."""
-    seq_dir = data_root / day / seq
+    """Convert one Innoviz sequence into a single `<scene_id>.h5` file.
+
+    With ``no_annotations`` the sequence is extracted for inference only: frames
+    are enumerated from ``polar/*.npz`` and no flow labels are written (just
+    ``lidar``/``pose``/``ground_mask``/``ego_motion``).
+    """
+    seq_dir = data_root / day if seq is None else data_root / day / seq
     if not seq_dir.is_dir():
         raise FileNotFoundError(f"Sequence directory not found: {seq_dir}")
 
-    scene_id = _scene_id_for(day, seq)
+    scene_id = day if seq is None else _scene_id_for(day, seq)
     output_h5 = output_dir / f"{scene_id}.h5"
 
     lut_path = seq_dir / "lut.npz"
@@ -437,7 +468,7 @@ def process_sequence(
     with np.load(lut_path) as lut_npz:
         unit_vec = lut_npz["unit_vec"].astype(np.float32)  # (H, W, 3)
 
-    frame_pairs = _enumerate_frames(seq_dir)
+    frame_pairs = _enumerate_frames(seq_dir, no_annotations=no_annotations)
     if max_frames is not None:
         frame_pairs = frame_pairs[:max_frames]
     if len(frame_pairs) < 2:
@@ -447,7 +478,9 @@ def process_sequence(
     if check_h5py_file_exists(output_h5, timestamps):
         return f"skip {scene_id} (already complete)"
 
-    tracks, _ = _parse_annotations(_annotations_path(seq_dir))
+    tracks: Dict[int, Dict[int, BoxAnnotation]] = {}
+    if not no_annotations:
+        tracks, _ = _parse_annotations(_annotations_path(seq_dir))
 
     # Decide LineFit params: explicit override > autodetect from frame 0 > toml default.
     tmp_config_path: Optional[Path] = None
@@ -496,14 +529,18 @@ def process_sequence(
 
             # Write the previous frame using the just-loaded current frame to derive flow.
             if prev_xyz is not None and prev_frame_idx is not None:
-                flow, valid, classes, instances, ego_motion = _per_point_flow(
-                    xyz0=prev_xyz,
-                    tracks=tracks,
-                    frame_t0=prev_frame_idx,
-                    frame_t1=frame_idx,
-                    box_pad=box_pad,
-                    dclass=dclass,
-                )
+                if no_annotations:
+                    flow = valid = classes = instances = None
+                    ego_motion = IDENTITY_4
+                else:
+                    flow, valid, classes, instances, ego_motion = _per_point_flow(
+                        xyz0=prev_xyz,
+                        tracks=tracks,
+                        frame_t0=prev_frame_idx,
+                        frame_t1=frame_idx,
+                        box_pad=box_pad,
+                        dclass=dclass,
+                    )
                 ts0 = str(prev_frame_idx * frame_period_ns)
                 grp = f.create_group(ts0)
                 _create_group_data(
@@ -538,17 +575,20 @@ def process_sequence(
     return f"wrote {scene_id} ({len(frame_pairs)} frames)"
 
 
-def _load_splits(splits_file: Path) -> Dict[str, List[Tuple[str, str]]]:
+def _load_splits(splits_file: Path) -> Dict[str, List[Tuple[str, Optional[str]]]]:
     with open(splits_file) as f:
         data = yaml.safe_load(f) or {}
-    out: Dict[str, List[Tuple[str, str]]] = {}
+    out: Dict[str, List[Tuple[str, Optional[str]]]] = {}
     for key in ("train", "val"):
         items = data.get(key) or []
-        parsed: List[Tuple[str, str]] = []
+        parsed: List[Tuple[str, Optional[str]]] = []
         for entry in items:
-            if "/" not in entry:
-                raise ValueError(f"Split entry must be '<day>/<seq>', got: {entry!r}")
-            day, seq = entry.split("/", 1)
+            entry = entry.strip().strip("/")
+            if not entry:
+                continue
+            # "<day>/<seq>" (seq may nest further); a single segment means the
+            # sequence's polar/ sits directly under data_root/<entry>.
+            day, seq = entry.split("/", 1) if "/" in entry else (entry, None)
             parsed.append((day, seq))
         out[key] = parsed
     return out
@@ -567,6 +607,7 @@ def _worker(args: dict) -> str:
         max_frames=args["max_frames"],
         auto_height=args["auto_height"],
         height_override=args["height_override"],
+        no_annotations=args["no_annotations"],
     )
 
 
@@ -583,8 +624,13 @@ def main(
     max_frames: Optional[int] = None,
     auto_height: bool = True,
     height: Optional[float] = None,
+    no_annotations: bool = False,
 ):
-    """CLI entry point. See module docstring for example invocation."""
+    """CLI entry point. See module docstring for example invocation.
+
+    Pass ``--no_annotations`` to extract for inference only (frames from
+    ``polar/*.npz``, no flow labels written).
+    """
     splits = _load_splits(Path(splits_file))
     if split not in ("train", "val", "both"):
         raise ValueError("--split must be one of: train, val, both")
@@ -616,6 +662,7 @@ def main(
                 max_frames=max_frames,
                 auto_height=auto_height,
                 height_override=height,
+                no_annotations=no_annotations,
             )
             for (day, seq) in seqs
         ]
@@ -628,7 +675,8 @@ def main(
                 tqdm.write(_worker(t))
         print(f"--- split '{sp}' done in {time.time() - start:.1f}s; building indices...")
         create_reading_index(sp_out, flow_inside_check=False)
-        create_reading_index(sp_out, flow_inside_check=True)
+        if not no_annotations:
+            create_reading_index(sp_out, flow_inside_check=True)
 
 
 if __name__ == "__main__":
