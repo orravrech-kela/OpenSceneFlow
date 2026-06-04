@@ -18,7 +18,7 @@ instrumented forward is verified equal to plain `model(batch)` to 4e-8).
 | **Stock model** | 359 ms | 357 | 368 | 406 | 2.8 | **NO — 3.6× over budget** |
 | + sparse-gather decoder (exact, no retrain) | 86 ms | 84 | 95 | 136 | 11.6 | borderline (11/120 frames >100 ms) |
 | + fp16 backbone | 84 ms | 81 | 97 | 104 | 12.0 | borderline-pass (4/120 frames >100 ms) |
-| + history-voxelization caching (estimate) | ~50–65 ms | | | | ~16–20 | **YES, with margin** |
+| + online history-voxelization caching (measured) | 41–50 ms | 48 | 53 | max 71 | 20–25 | **YES, with margin** |
 
 The model is **not deployable as-is**, but the blocker is a single
 inference-only inefficiency, not the network itself: **76 % of the frame time
@@ -85,14 +85,40 @@ the spconv backbone is index-bookkeeping-bound, not FLOP-bound. Flow deviation
 4.4e-4 m (vs the 0.05 m dynamic threshold). Worth keeping (p99 104 vs 136 ms)
 but validate metrics first; not the main lever.
 
-### 3. Cache history-frame voxelization (estimated, static sensor only)
+### 3. Online history-voxelization caching (implemented + measured, static sensor)
 
-Each forward voxelizes 5 frames, but 4 of them (pc0, pch1–3) were already
-voxelized on previous ticks. Because the sensor is static (pose warp ≈
-identity), voxel coords and PFN features of past frames don't change and can
-be cached, leaving only the newest frame's voxelize+PFN (~9.5 ms) per tick.
-Estimated saving ≈ 4 × 9.2 ≈ **37 ms** → steady-state ≈ 50–65 ms typical.
-Caveat: estimate only (not implemented); breaks if the sensor ever moves.
+Each offline forward voxelizes 5 frames, but in a stream 4 of them (pc0,
+pch1–3) were already voxelized on previous ticks. The pbench H5 poses are
+*exactly* identity (`max|pose−I| = 0.0`), so the per-tick warp into the newest
+frame is a bit-exact no-op and cached voxel coords + PFN features stay valid.
+The age-dependent `decay^k` weighting is applied at the cheap accumulate step,
+so it doesn't break caching either.
+
+Implemented as `tools/benchmark_latency.py::OnlineCachedRunner` (`--online N`):
+a stateful wrapper holding the last 5 frames' voxelizations; each tick =
+voxelize newest frame → rebuild delta tensor from cache → backbone → sparse-
+gather decoder. Validated against the offline forward on identical frames:
+max |Δflow| ≤ 8e-6 (sparse-sum reordering, not approximation).
+
+Measured steady-state per tick, 80 consecutive frames per scene (fp32):
+
+| Scene | pts/frame | push (vox+PFN ×1) | delta | backbone | decoder | total | FPS |
+|---|---|---|---|---|---|---|---|
+| dune_bushes_hills (light) | 25k | 8.5 | 0.9 | 30.6 | 0.7 | **40.8** (max 42.8) | 24.5 |
+| meginim (typical) | 225k | 9.2 | 2.0 | 35.2 | 1.5 | **48.0** (max 51.3) | 20.8 |
+| dark_yarkon_park #2 (heaviest) | 480k | 11.4 | 2.1 | 32.6 | 3.3 | **49.5** (max 71.0) | 20.2 |
+
+Caching collapses the point-count scaling (the 122 ms heavy-scene outlier was
+exactly the 5× PFN recompute) — worst observed tick anywhere is 71 ms. The
+steady-state bottleneck becomes the MinkUNet backbone (~30–35 ms, nearly
+scene-independent). Caveats: needs a static sensor (any ego-motion invalidates
+the cache → fall back to the 86 ms full path); cache holds ~5 frames of voxel
++ point features (worst case a few hundred MB).
+
+Note on latency semantics: the model predicts flow pc0→pc1, i.e. the flow for
+frame t−1 becomes available once frame t arrives. Output therefore always
+trails the sensor by one frame period (100 ms) *plus* the ~50 ms compute —
+inherent to the model formulation, independent of these optimizations.
 
 ## Scaling behavior / tail risk
 
@@ -111,9 +137,11 @@ Per-scene means with the sparse-gather decoder:
 
 The dark-park scenes carry 5× the median point load (~520k non-ground points
 vs 225k median) and are the only ones that miss the 100 ms deadline after the
-decoder fix. Mitigations, in order of preference: voxelization caching (#3
-above, covers it with margin), point-count capping / range-based subsampling
-on the input cloud, or investigating why these recordings keep so many
+decoder fix. The online caching (#3 above) removes this scaling entirely —
+measured 49.5 ms mean / 71 ms max on the heaviest scene — because the per-tick
+point-dependent work shrinks to a single frame's voxelize+PFN. If caching is
+ever unavailable (moving sensor), fall back to point-count capping /
+range-based subsampling, or investigate why these recordings keep so many
 non-ground returns.
 
 ## Verdict
@@ -123,9 +151,11 @@ non-ground returns.
 - **With the sparse-gather decoder (exact, inference-only): yes, marginally** —
   11.6 FPS mean, 1.7 GB memory, but ~9 % of heavy-scene frames still exceed
   100 ms.
-- **With decoder fix + history-voxel caching (+ optional fp16 backbone):
-  deployable with headroom** — estimated 50–65 ms/frame (~16–20 FPS) on the L4,
-  worst observed scene ≈ 90 ms.
+- **With decoder fix + online history-voxel caching: deployable with
+  headroom** — measured 41–50 ms/tick (20–25 FPS) on the L4, worst observed
+  tick 71 ms, on the heaviest scene in the set. Remaining bottleneck is the
+  spconv backbone (~30–35 ms); fp16 / implicit-gemm algo are the next levers
+  if more margin is ever needed.
 
 ## Reproduce
 
@@ -134,8 +164,12 @@ non-ground returns.
   --checkpoint logs/jobs/deltaflow-5f-waymo/05-27-22-16/checkpoints/last.ckpt \
   --data_dir /home/ubuntu/orr/data/innoviz_h5/pbench/val \
   --num_samples 120 --warmup 10 --opt_decoder --amp --profile
+
+# online streaming simulation (cached history voxelization):
+.venv/bin/python tools/benchmark_latency.py \
+  --online 80 --online_scenes "meginim_11_02_2026,19_03_26,dune_bushes"
 ```
 
-Raw outputs (per-sample JSON, op-level profiler table, chrome trace):
-`logs/benchmark/deltaflow-5f-waymo/{results.json,profiler_top_ops.txt,trace.json}`
+Raw outputs (per-sample JSON, op-level profiler table, chrome trace, online sim):
+`logs/benchmark/deltaflow-5f-waymo/{results.json,profiler_top_ops.txt,trace.json,online_results.json}`
 (benchmarked 2026-06-04).

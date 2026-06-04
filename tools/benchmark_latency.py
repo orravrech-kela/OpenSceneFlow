@@ -272,6 +272,141 @@ def model_forward_opt_decoder(model, batch, amp_backbone=False):
     return flows
 
 
+# ------------------------------------------------------- online streaming ----
+class OnlineCachedRunner:
+    """Simulates streaming deployment: each scan is voxelized+PFN'd once on
+    arrival and the result is reused while the frame stays in the window.
+    Exact (bit-identical) only for a static sensor with identity poses —
+    then the per-tick pose warp is a no-op and cached voxel coords stay valid.
+    The age-dependent decay weighting is applied at the cheap accumulate step,
+    so it does not break caching."""
+
+    def __init__(self, model):
+        self.model = model
+        self.num_frames = model.num_frames
+        self.window = []  # newest last; window[-1]=pc1, window[-2]=pc0, ...
+
+    def push_frame(self, pc):
+        """pc: [1, N, 3] cuda, ground-stripped. Voxelize + PFN once."""
+        net = self.model.pc2voxel
+        info = net.voxelizer(pc)[0]
+        voxel_feats, voxel_coors, point_feats = net.feature_net(info["points"], info["voxel_coords"])
+        batch_idx = torch.zeros((voxel_coors.size(0), 1), dtype=torch.long, device=voxel_coors.device)
+        coors = torch.cat([batch_idx, voxel_coors[:, [2, 1, 0]]], dim=1)
+        self.window.append({"pc": pc, "info": info, "voxel_feats": voxel_feats,
+                            "coors": coors, "point_feats": point_feats})
+        if len(self.window) > self.num_frames:
+            self.window.pop(0)
+
+    def ready(self):
+        return len(self.window) == self.num_frames
+
+    def infer(self, amp_backbone=False, t=None):
+        """Flow for window[-2] (pc0) -> window[-1] (pc1). Mirrors
+        SparseVoxelNet.forward's delta accumulation on cached voxelizations."""
+        import spconv.pytorch as spconv
+        net = self.model.pc2voxel
+        nullt = StageTimer(); nullt.enabled = t is None
+        t = t or nullt
+
+        with t.time("online/delta_accumulate"):
+            sparse_max_size = [1, *net.voxel_spatial_shape, net.num_feature]
+            f1 = self.window[-1]
+            sparse_pc1 = torch.sparse_coo_tensor(f1["coors"].t(), f1["voxel_feats"], size=sparse_max_size)
+            sparse_diff = torch.sparse_coo_tensor(f1["coors"].t(), f1["voxel_feats"] * 0.0, size=sparse_max_size)
+            for time_index in range(self.num_frames - 1):  # 0=pc0, 1=pch1, ...
+                fx = self.window[-2 - time_index]
+                sparse_pcx = torch.sparse_coo_tensor(fx["coors"].t(), fx["voxel_feats"], size=sparse_max_size)
+                sparse_diff = sparse_diff + (sparse_pc1 - sparse_pcx) * pow(net.decay_factor, time_index)
+            coalesced = sparse_diff.coalesce()
+            features = coalesced.values() / (self.num_frames - 1)
+            indices = coalesced.indices().t().to(dtype=torch.int32)
+            delta_sparse = spconv.SparseConvTensor(
+                features.contiguous(), indices.contiguous(), net.voxel_spatial_shape, 1)
+
+        with t.time("online/backbone"):
+            if amp_backbone:
+                with torch.autocast("cuda", dtype=torch.float16):
+                    backbone_res = self.model.backbone(delta_sparse)
+                backbone_res = backbone_res.replace_feature(backbone_res.features.float())
+            else:
+                backbone_res = self.model.backbone(delta_sparse)
+
+        with t.time("online/decoder"):
+            pc0 = self.window[-2]
+            flows = decoder_forward_sparse_gather(
+                self.model.flowdecoder, backbone_res, [pc0["info"]], [pc0["point_feats"]])
+        return flows
+
+
+def run_online_sim(model, cfg, args, out_dir):
+    """Stream consecutive frames of real sequences through OnlineCachedRunner
+    and measure steady-state per-tick latency."""
+    import h5py
+    num_frames = int(cfg.num_frames)
+    files = sorted(os.listdir(args.data_dir))
+    all_results = {}
+    for pat in args.online_scenes.split(","):
+        pat = pat.strip()
+        fname = next((f for f in files if pat in f and f.endswith(".h5")), None)
+        assert fname, f"no h5 matching '{pat}' in {args.data_dir}"
+        scene = fname[:-3]
+        runner = OnlineCachedRunner(model)
+        timer = StageTimer()
+        ticks, n_warm = [], 5
+        with h5py.File(os.path.join(args.data_dir, fname), "r") as f:
+            keys = sorted(f.keys(), key=int)[: args.online + num_frames + n_warm]
+            with torch.inference_mode():
+                for ki, k in enumerate(keys):
+                    pc = f[k]["lidar"][:, :3][~f[k]["ground_mask"][:]]
+                    pc = torch.from_numpy(pc).cuda().unsqueeze(0)
+
+                    torch.cuda.synchronize(); t0 = time.perf_counter()
+                    runner.push_frame(pc)
+                    torch.cuda.synchronize(); push_ms = (time.perf_counter() - t0) * 1e3
+                    if not runner.ready():
+                        continue
+
+                    t0 = time.perf_counter()
+                    flows = runner.infer(amp_backbone=args.amp, t=timer)
+                    torch.cuda.synchronize(); infer_ms = (time.perf_counter() - t0) * 1e3
+
+                    if len(ticks) == 0 and not hasattr(runner, "_validated"):
+                        # exactness check vs the offline forward on identical frames
+                        eye = torch.eye(4, device="cuda").unsqueeze(0)
+                        batch = {"pc1": runner.window[-1]["pc"], "pc0": runner.window[-2]["pc"],
+                                 "pose0": eye, "pose1": eye}
+                        for i in range(1, num_frames - 1):
+                            batch[f"pch{i}"] = runner.window[-2 - i]["pc"]
+                            batch[f"poseh{i}"] = eye
+                        ref = model(batch)["flow"][0]
+                        diff = (ref - flows[0]).abs().max().item()
+                        assert diff < 1e-3, f"online runner diverges from offline forward: {diff}"
+                        print(f"[sanity][{scene[:40]}] online == offline forward (max_diff={diff:.2e})")
+                        runner._validated = True
+
+                    ticks.append({"push_ms": push_ms, "infer_ms": infer_ms,
+                                  "total_ms": push_ms + infer_ms,
+                                  "n_points": int(pc.shape[1])})
+            ticks = ticks[n_warm:]  # drop allocator/autotune warmup ticks
+        agg = {kk: percentiles([x[kk] for x in ticks]) for kk in ("push_ms", "infer_ms", "total_ms")}
+        for kk in sorted(timer.records):
+            agg[kk] = percentiles(timer.records[kk][n_warm:])
+        timer.records.clear()
+        all_results[scene] = {"ticks": ticks, "agg": agg}
+        tot = agg["total_ms"]
+        print(f"[online] {scene[:55]:55s} n={len(ticks)} "
+              f"total mean {tot['mean']:.1f} | p50 {tot['p50']:.1f} | p90 {tot['p90']:.1f} | "
+              f"max {tot['max']:.1f} ms => {1000.0/tot['mean']:.1f} FPS")
+        print(f"         push(newest voxelize+PFN) {agg['push_ms']['mean']:.1f} | "
+              f"delta {agg['online/delta_accumulate']['mean']:.1f} | "
+              f"backbone {agg['online/backbone']['mean']:.1f} | "
+              f"decoder {agg['online/decoder']['mean']:.1f} ms")
+    with open(os.path.join(out_dir, "online_results.json"), "w") as fp:
+        json.dump({"amp_backbone": args.amp, "scenes": all_results}, fp, indent=1)
+    print(f"[online] online_results.json written to {out_dir}")
+
+
 # ----------------------------------------------------------------- main ----
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -286,6 +421,12 @@ def main():
     ap.add_argument("--amp", action="store_true", help="additionally measure fp16 autocast e2e latency")
     ap.add_argument("--opt_decoder", action="store_true",
                     help="additionally measure e2e with a sparse-gather decoder (skips .dense())")
+    ap.add_argument("--online", type=int, default=0,
+                    help="run the online streaming simulation instead (cached history "
+                         "voxelization, static sensor): N consecutive frames per scene; "
+                         "--amp switches its backbone to fp16")
+    ap.add_argument("--online_scenes", default="meginim_11_02_2026,19_03_26",
+                    help="comma-separated filename substrings selecting sequences for --online")
     args = ap.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -297,6 +438,10 @@ def main():
 
     model, cfg = build_model(args.checkpoint)
     num_frames = int(cfg.num_frames)
+
+    if args.online:
+        run_online_sim(model, cfg, args, out_dir)
+        return
 
     ds = HDF5Dataset(args.data_dir, n_frames=num_frames)
     n = len(ds)
