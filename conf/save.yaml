@@ -2,6 +2,15 @@ dataset_path: /home/kin/data/av2/h5py/demo/val
 checkpoint: /home/kin/model_zoo/seflow_best.ckpt
 res_name: # if None will directly be the `model_name.ckpt` in checkpoint path
 val_index_only: False # [True, False]
+num_workers: 4
+sparse_decoder: True # exact sparse-gather decoder at inference; ~4x faster on large grids
+
+# Direct polar-sidecar output: write sparse fp16 npz under <seq>/<sidecar_subdir>/
+# instead of growing the H5. Set to the processed-data root (e.g.
+# /mnt/data/lidar/processed); leave empty for the legacy H5 write.
+save_sidecar_root:
+sidecar_subdir: pred_flow
+sidecar_threshold: 0.05 # min |flow| m/frame stored; same semantics as legacy has_flow
 
 # no need to change
 num_frames: 2

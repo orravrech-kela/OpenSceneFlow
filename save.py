@@ -55,7 +55,7 @@ def main(cfg):
     trainer.test(model = mymodel, \
                  dataloaders = DataLoader(\
                      HDF5Dataset(cfg.dataset_path, n_frames=cfg.num_frames, eval=cfg.val_index_only), \
-                    batch_size=1, shuffle=False))
+                    batch_size=1, shuffle=False, num_workers=cfg.get("num_workers", 0)))
 
 if __name__ == "__main__":
     main()

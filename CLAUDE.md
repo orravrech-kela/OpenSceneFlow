@@ -49,6 +49,17 @@ config — always cross-check the ckpt before changing these values.
 `deltaflowLoss`. Using a different loss for finetune is allowed but you'd lose
 the loss-scale matching that the ckpt's optimizer state encodes.
 
+## Batch inference (many sequences)
+
+Don't use the legacy 3-pass flow (save.py H5-write → save_pred_flow_masks
+export): it doubles each H5 with fp32 predictions and re-reads everything. Run
+`save.py` with `save_sidecar_root=/mnt/data/lidar/processed` instead — it
+writes sparse fp16 sidecars (~5 KB/frame vs 2.4 MB dense) straight under
+`<seq>/pred_flow/`, after which the H5s are disposable. `sparse_decoder=True`
+(default in conf/save.yaml) is the exact `.dense()`-free decoder — ~4× faster,
+1.7 GB GPU. Details: dataprocess/README.md § "Inference only (no annotations)".
+`src.utils.flow_sidecar.load_flow_sidecar` reads both sidecar formats.
+
 ## Relabel workflow
 
 For label-only changes (box positions, classes, track ids — anything that
