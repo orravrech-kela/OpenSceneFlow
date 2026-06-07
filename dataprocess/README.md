@@ -342,21 +342,43 @@ To predict flow on sequences that have no annotations, pass `--no_annotations`
 to the extractor: frames are enumerated straight from `polar/*.npz` and only
 `lidar`/`pose`/`ground_mask`/`ego_motion` are written (no flow labels, only
 `index_total.pkl`). `save.py` restores `voxel_size`/`point_cloud_range`/
-`num_frames` from the checkpoint, so no overrides are needed. Pass the same
-`--no_annotations` to `save_pred_flow_masks.py` so step 3 enumerates frames the
-same way.
+`num_frames` from the checkpoint, so no overrides are needed.
 
 ```bash
-# 1. extract polar npz -> H5 (no labels)
+# 1. extract polar npz -> H5 (no labels); ~0.6 s/frame/worker
 python dataprocess/extract_innoviz.py --splits_file conf/innoviz_splits.yaml \
-  --data_root /mnt/data/lidar/pbench --output_dir /mnt/data/lidar/h5/pbench \
-  --split val --no_annotations=True
-# 2. inference -> writes f[ts][res_name] into each H5
+  --data_root /mnt/data/lidar/processed --output_dir /mnt/data/lidar/h5/batch \
+  --split val --no_annotations=True --num_workers 4
+# 2. inference -> sparse fp16 sidecars under <seq>/pred_flow/ in the processed tree
 python save.py model=deltaflow checkpoint=model_zoo/deltaflow-waymo.ckpt \
-  dataset_path=/mnt/data/lidar/h5/pbench/val res_name=deltaflow_waymo
-# 3. project predictions -> per-frame polar npz sidecars
-python dataprocess/save_pred_flow_masks.py --data_root /mnt/data/lidar/pbench \
-  --sequences palmam_test/car --h5_path /mnt/data/lidar/h5/pbench/val/palmam_test__car.h5 \
+  dataset_path=/mnt/data/lidar/h5/batch/val \
+  save_sidecar_root=/mnt/data/lidar/processed
+# 3. (optional) the H5s are now disposable — predictions live in the sidecars
+```
+
+`save_sidecar_root` makes `test_step` write per-frame sidecars directly instead
+of growing the H5 with fp32 predictions (which used to double it) and needing a
+separate `save_pred_flow_masks.py` export pass. Sidecars are sparse: only
+pixels with `|flow| >= sidecar_threshold` (default 0.05 m, same semantics as
+the legacy `has_flow`) are stored, as fp16 + uint32 pixel index — ~5 KB/frame
+vs ~2.4 MB dense. `src.utils.flow_sidecar.load_flow_sidecar` reads both
+formats; `src/motion` and the lidar `offline_viewer.py` already use it. Note
+sub-threshold flow is not stored, so pick the threshold no higher than the
+smallest detection tau you plan to use downstream.
+
+`sparse_decoder=True` (default in `conf/save.yaml`) swaps `Point_head`'s
+`.dense()` voxel gather for an exact sparse lookup at inference — ~4x faster
+end-to-end and 13.6 GB -> 1.7 GB GPU on the long-range Innoviz grid (see
+`assets/docs/latency_deltaflow-5f-waymo.md`).
+
+The legacy path (predictions written into the H5 under `f[ts][res_name]`, then
+projected to sidecars) still works — leave `save_sidecar_root` empty and run:
+
+```bash
+python save.py model=deltaflow checkpoint=model_zoo/deltaflow-waymo.ckpt \
+  dataset_path=/mnt/data/lidar/h5/batch/val res_name=deltaflow_waymo
+python dataprocess/save_pred_flow_masks.py --data_root /mnt/data/lidar/processed \
+  --sequences palmam_test/car --h5_path /mnt/data/lidar/h5/batch/val/palmam_test__car.h5 \
   --res_name deltaflow_waymo --subdir pred_flow --no_annotations=True
 ```
 

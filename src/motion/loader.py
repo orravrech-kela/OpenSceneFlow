@@ -1,8 +1,9 @@
 """Load Innoviz polar frames + predicted flow, unproject to moving-point candidates.
 
 The predicted-flow sidecar (``<seq>/<pred_subdir>/<raw_id>.npz``, written by
-``dataprocess/save_pred_flow_masks.py``) is pixel-aligned with the polar
-``distance`` grid: ``flow[r,c]`` is the prediction for the point
+``save.py`` sidecar mode or legacy ``dataprocess/save_pred_flow_masks.py``;
+both formats handled by ``src.utils.flow_sidecar``) is pixel-aligned with the
+polar ``distance`` grid: ``flow[r,c]`` is the prediction for the point
 ``distance[r,c] * unit_vec[r,c]``. Sensor is static, so flow == object motion.
 """
 
@@ -13,6 +14,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+
+from src.utils.flow_sidecar import load_flow_sidecar
 
 
 @dataclass
@@ -46,9 +49,7 @@ def load_candidates(
     unit_vec = _load_unit_vec(str(seq_dir / "lut.npz"))
     with np.load(seq_dir / "polar" / f"{raw_id}.npz") as pf:
         distance = pf["distance"].astype(np.float32)
-    with np.load(seq_dir / pred_subdir / f"{raw_id}.npz") as pf:
-        flow = pf["flow"].astype(np.float32)
-        has_flow = pf["has_flow"]
+    flow, has_flow = load_flow_sidecar(seq_dir / pred_subdir / f"{raw_id}.npz")
 
     valid = distance > 0.0
     mag = np.linalg.norm(flow, axis=-1)

@@ -53,6 +53,10 @@ class ModelWrapper(LightningModule):
             "save_res": False,
             "res_name": "default",
             "num_frames": 2,
+            "sparse_decoder": False,    # exact sparse-gather decoder at inference (no .dense())
+            "save_sidecar_root": None,  # processed-data root: test_step writes polar sidecars instead of H5
+            "sidecar_subdir": "pred_flow",
+            "sidecar_threshold": 0.05,
 
             # lr scheduler, only active when warmup_epochs > 0
             "optimizer": None,
@@ -84,6 +88,22 @@ class ModelWrapper(LightningModule):
         if 'pretrained_weights' in cfg and cfg.pretrained_weights is not None:
             missing_keys, unexpected_keys = self.model.load_from_checkpoint(cfg.pretrained_weights)
         # print(f"Model: {self.model.__class__.__name__}, Number of Frames: {self.num_frames}")
+
+        if self.sparse_decoder:
+            n_sparse = 0
+            for m in self.model.modules():
+                if hasattr(m, "sparse_inference"):
+                    m.sparse_inference = True
+                    n_sparse += 1
+            print(f"[LOG] sparse_decoder=True: sparse-gather inference enabled on {n_sparse} decoder module(s)")
+
+        self.sidecar_writer = None
+        if self.save_sidecar_root is not None:
+            from src.utils.flow_sidecar import PolarSidecarWriter
+            self.sidecar_writer = PolarSidecarWriter(
+                self.save_sidecar_root, subdir=self.sidecar_subdir, threshold=self.sidecar_threshold)
+            print(f"[LOG] test predictions -> sparse sidecars under <seq>/{self.sidecar_subdir}/ "
+                  f"({len(self.sidecar_writer._scene_dirs)} sequences found under {self.save_sidecar_root})")
 
         # ---> loss fn
         self.loss_fn = import_func("src.lossfuncs."+cfg.loss_fn) if 'loss_fn' in cfg else None
@@ -429,17 +449,25 @@ curl -X POST https://sceneflow.argoverse.org/submissions/upload \\
         else:
             final_flow[~batch['gm0']] = res_dict['flow'] + pose_flow[~batch['gm0']]
 
-        # write final_flow into the dataset.
+        # write final_flow into the polar sidecar (preferred) or back into the H5.
         key = str(batch['timestamp'])
         scene_id = batch['scene_id']
-        with h5py.File(os.path.join(self.dataset_path, f'{scene_id}.h5'), 'r+') as f:
-            if self.res_name in f[key]:
-                del f[key][self.res_name]
-            f[key].create_dataset(self.res_name, data=final_flow.cpu().detach().numpy().astype(np.float32))
+        if self.sidecar_writer is not None:
+            self.sidecar_writer.write(scene_id, key, final_flow.cpu().detach().numpy().astype(np.float32))
+        else:
+            with h5py.File(os.path.join(self.dataset_path, f'{scene_id}.h5'), 'r+') as f:
+                if self.res_name in f[key]:
+                    del f[key][self.res_name]
+                f[key].create_dataset(self.res_name, data=final_flow.cpu().detach().numpy().astype(np.float32))
 
     def on_test_epoch_end(self):
         self.model.timer.print(random_colors=False, bold=False)
         print(f"\n\nModel: {self.model.__class__.__name__}, Checkpoint from: {self.checkpoint}")
-        print(f"We already write the flow_est into the dataset, please run following commend to visualize the flow. Copy and paste it to your terminal:")
-        print(f"python tools/visualization.py --res_name \"['{self.res_name}']\" --data_dir {self.dataset_path}")
+        if self.sidecar_writer is not None:
+            print(f"Sidecar output: {self.sidecar_writer.summary()}")
+            print(f"Visualize with offline_viewer.py --flow-dir <seq>/{self.sidecar_writer.subdir}, "
+                  f"or track movers with tools/detect_track_movers.py")
+        else:
+            print(f"We already write the flow_est into the dataset, please run following commend to visualize the flow. Copy and paste it to your terminal:")
+            print(f"python tools/visualization.py --res_name \"['{self.res_name}']\" --data_dir {self.dataset_path}")
         print(f"Enjoy! ^v^ ------ \n")
