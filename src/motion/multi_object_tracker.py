@@ -8,6 +8,7 @@ that carry a persistent but spurious flow prediction.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from scipy.optimize import linear_sum_assignment
@@ -29,6 +30,10 @@ class MOTParams:
     gate_distance: max association distance, meters (legacy ``max_dist``).
     disp_gate: net translation (m) a track must reach before it is emitted
         (OSF static-structure filter; no lidar equivalent).
+    min_speed: min coherent BEV speed (m/frame) to emit -- rejects near-static jitter.
+    max_motion_angle: max angle (deg) between a track's net displacement and its
+        flow velocity to emit. Real movers travel along their velocity; noisy
+        false-flow clusters drift incoherently and are rejected. 180 disables it.
     use_bev_iou: associate by BEV-IoU instead of centroid distance.
     """
 
@@ -36,6 +41,8 @@ class MOTParams:
     min_hits: int = 3
     gate_distance: float = 2.5
     disp_gate: float = 0.5
+    min_speed: float = 0.05
+    max_motion_angle: float = 60.0
     use_bev_iou: bool = False
     kalman_params: KalmanTrackerParams | None = None
 
@@ -108,15 +115,20 @@ class MultiObjectTracker:
             trackers_to_keep.append(tracker)
         self._trackers = trackers_to_keep
 
-        # Emit confirmed tracks updated this frame that have moved past the gate.
+        # Emit confirmed tracks updated this frame that pass the motion gates.
+        cos_gate = math.cos(math.radians(self._params.max_motion_angle))
         results = []
         for tracker in self._trackers:
-            if (
-                tracker.state == TrackState.CONFIRMED
-                and tracker.time_since_update == 0
-                and tracker.displacement >= self._params.disp_gate
-            ):
-                results.append(tracker.to_tracked_detection())
+            if tracker.state != TrackState.CONFIRMED or tracker.time_since_update != 0:
+                continue
+            if tracker.displacement < self._params.disp_gate:
+                continue
+            # Velocity-coherence gate: a real mover travels along its velocity; a
+            # noisy false-flow cluster's centroid drifts off its erratic velocity.
+            speed, cos_ang = tracker.motion_coherence()
+            if speed < self._params.min_speed or cos_ang < cos_gate:
+                continue
+            results.append(tracker.to_tracked_detection())
         return results
 
     def get_all_tracks(self) -> list[TrackedDetection]:

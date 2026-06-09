@@ -114,6 +114,7 @@ def detect_frame(
     vel_weight: float = 1.0,
     speed_yaw_thresh: float = 0.15,
     min_box_points: int = 6,
+    min_current_points: int = 2,
 ) -> List[Detection]:
     """window: list of (offset, xyz, vel) where offset = neighbor_idx - frame_idx.
 
@@ -121,6 +122,11 @@ def detect_frame(
     adjacent objects moving differently split into separate clusters: a velocity
     difference of 1/vel_weight (m/frame) separates points at the same location.
     vel_weight=0 reproduces position-only DBSCAN.
+
+    min_current_points requires a cluster to have at least this many points at the
+    target frame (offset 0) to be emitted -- it rejects pure temporal smear from
+    objects only present in past/future window frames (which otherwise produce
+    boxes ~window frames before an object arrives and after it leaves). 0 disables.
     """
     chunks = [(off, xyz, vel) for off, xyz, vel in window if xyz.shape[0] > 0]
     if not chunks:
@@ -162,11 +168,15 @@ def detect_frame(
             continue
         if np.unique(F[m]).size < min_frames_eff:
             continue
+        cur = F[m] == 0
+        # Require the object to actually be present at the target frame (not pure
+        # past/future smear).
+        if int(cur.sum()) < min_current_points:
+            continue
         pts = P[m]
         vel_med = np.median(V[m], axis=0)
         # Size the box from current-frame members only (offset 0, un-de-translated)
         # to avoid flow-smear; the pooled window is for finding/velocity/persistence.
-        cur = F[m] == 0
         pts_box = pts[cur] if int(cur.sum()) >= min_box_points else pts
         box, corners, z_lo, z_hi = fit_box(pts_box, vel=vel_med, speed_yaw_thresh=speed_yaw_thresh)
         dets.append(

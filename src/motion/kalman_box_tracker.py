@@ -209,6 +209,24 @@ class KalmanBoxTracker:
         cur = np.array([x[0, 0], x[1, 0], x[2, 0]])
         return float(np.linalg.norm(cur - self.first_center))
 
+    def motion_coherence(self) -> tuple[float, float]:
+        """(bev_speed, cos_angle) between net BEV displacement and BEV velocity.
+
+        cos_angle ~1 when the track actually travelled along its (flow-driven)
+        velocity -- a coherent mover -- and drops toward 0 / negative for noisy
+        false-flow clusters whose centroid drifts off their erratic velocity.
+        Returns cos_angle = -1.0 when speed or displacement is ~0 (direction undefined).
+        """
+        x = self._kf.x
+        dx = float(x[0, 0] - self.first_center[0])
+        dy = float(x[1, 0] - self.first_center[1])
+        vx, vy = float(x[7, 0]), float(x[8, 0])
+        speed = float(np.hypot(vx, vy))
+        dnorm = float(np.hypot(dx, dy))
+        if speed < 1e-6 or dnorm < 1e-6:
+            return speed, -1.0
+        return speed, (dx * vx + dy * vy) / (dnorm * speed)
+
     def get_state(self) -> np.ndarray:
         return self._kf.x.flatten()
 

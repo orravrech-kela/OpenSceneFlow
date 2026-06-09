@@ -52,11 +52,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max-range", type=float, default=120.0)
     ap.add_argument("--vel-weight", type=float, default=1.0, help="velocity weight in clustering (0 = position-only)")
     ap.add_argument("--speed-yaw", type=float, default=0.15, help="min |vel_xy| (m/frame) to derive yaw from flow")
+    ap.add_argument("--min-current-points", type=int, default=2, help="min points at target frame to emit (rejects temporal smear; 0 disables)")
     # tracking
     ap.add_argument("--max-dist", type=float, default=2.5)
     ap.add_argument("--min-hits", type=int, default=3)
     ap.add_argument("--max-misses", type=int, default=4)
     ap.add_argument("--disp-gate", type=float, default=0.5, help="net translation (m) before a track is emitted")
+    ap.add_argument("--min-speed", type=float, default=0.05, help="min coherent BEV speed (m/frame) to emit a track")
+    ap.add_argument("--max-motion-angle", type=float, default=60.0, help="max angle (deg) between net displacement and velocity to emit (180 disables)")
     ap.add_argument("--use-bev-iou", action="store_true", help="associate by BEV-IoU instead of distance")
     ap.add_argument("--no-flow-meas", action="store_true", help="don't fuse flow velocity as a KF measurement")
     # run
@@ -94,6 +97,8 @@ def main() -> int:
         min_hits=args.min_hits,
         max_age=args.max_misses,
         disp_gate=args.disp_gate,
+        min_speed=args.min_speed,
+        max_motion_angle=args.max_motion_angle,
         use_bev_iou=args.use_bev_iou,
         kalman_params=KalmanTrackerParams(dt=1.0, use_flow_measurement=not args.no_flow_meas),
     ))
@@ -111,6 +116,7 @@ def main() -> int:
             eps=args.eps, min_samples=args.min_samples, min_points=args.min_points,
             min_frames=args.min_frames, max_range=args.max_range,
             vel_weight=args.vel_weight, speed_yaw_thresh=args.speed_yaw,
+            min_current_points=args.min_current_points,
         )
         emitted = tracker.update([d.to_measurement() for d in dets])
         per_frame[rid] = (j, emitted)

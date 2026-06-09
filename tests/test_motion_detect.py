@@ -41,6 +41,20 @@ class TestDeTranslation:
         assert dets[0].velocity == pytest.approx([1.0, 0.0, 0.0])
 
 
+class TestCurrentFrameSupport:
+    def test_rejects_pure_smear(self) -> None:
+        # Object only present in PAST frames (offsets -3,-2,-1), nothing at t=0.
+        rng = np.random.RandomState(5)
+        base = rng.uniform(-0.2, 0.2, (20, 3))
+        v = np.array([1.0, 0.0, 0.0])
+        window = [(off, base + off * v, np.tile(v, (20, 1))) for off in (-3, -2, -1)]
+        kw = dict(eps=0.5, min_samples=5, min_points=12, min_frames=2)
+        # Gate on (default): no current-frame support -> not detected.
+        assert detect_frame(window, 0, "0", min_current_points=3, **kw) == []
+        # Gate off: the smear is detected (the old behavior).
+        assert len(detect_frame(window, 0, "0", min_current_points=0, **kw)) == 1
+
+
 class TestFitBox:
     def test_yaw_from_flow_when_moving(self) -> None:
         rng = np.random.RandomState(2)

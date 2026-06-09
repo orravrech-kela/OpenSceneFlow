@@ -161,8 +161,9 @@ class TestMultiObjectTracker:
         assert tracker.num_tracks == 1
 
     def test_track_confirmed_after_min_hits(self) -> None:
-        # disp_gate=0 isolates confirmation from the static-structure gate.
-        tracker = MultiObjectTracker(MOTParams(min_hits=3, max_age=5, disp_gate=0.0))
+        # disp_gate=0 + gates off isolates confirmation from the motion gates.
+        tracker = MultiObjectTracker(MOTParams(min_hits=3, max_age=5, disp_gate=0.0,
+                                               min_speed=0.0, max_motion_angle=180.0))
         assert tracker.update([meas(0, 0, 0)]) == []
         assert tracker.update([meas(0, 0, 0)]) == []
         results = tracker.update([meas(0, 0, 0)])
@@ -179,7 +180,8 @@ class TestMultiObjectTracker:
 
     def test_correct_association(self) -> None:
         tracker = MultiObjectTracker(
-            MOTParams(min_hits=1, max_age=5, gate_distance=2.0, disp_gate=0.0)
+            MOTParams(min_hits=1, max_age=5, gate_distance=2.0, disp_gate=0.0,
+                      min_speed=0.0, max_motion_angle=180.0)
         )
         tracker.update([meas(0, 0, 0), meas(10, 0, 0)])
         results = tracker.update([meas(0.5, 0, 0), meas(9.5, 0, 0)])
@@ -210,7 +212,8 @@ class TestMultiObjectTracker:
 
     def test_bev_iou_association(self) -> None:
         tracker = MultiObjectTracker(
-            MOTParams(min_hits=1, max_age=5, use_bev_iou=True, disp_gate=0.0)
+            MOTParams(min_hits=1, max_age=5, use_bev_iou=True, disp_gate=0.0,
+                      min_speed=0.0, max_motion_angle=180.0)
         )
         tracker.update([meas(0, 0, 0, 4, 2, 2, 0.0)])
         res = tracker.update([meas(0.3, 0, 0, 4, 2, 2, 0.0)])  # overlaps -> matched
@@ -218,6 +221,24 @@ class TestMultiObjectTracker:
         # disjoint detection -> no IoU overlap -> new track
         tracker.update([meas(0.3, 0, 0, 4, 2, 2, 0.0), meas(50, 0, 0, 4, 2, 2, 0.0)])
         assert tracker.num_tracks == 2
+
+    def test_coherence_gate_emits_coherent_mover(self) -> None:
+        params = MOTParams(min_hits=2, max_age=5, gate_distance=5.0, disp_gate=0.3,
+                           min_speed=0.05, max_motion_angle=45.0)
+        tracker = MultiObjectTracker(params)
+        results: list = []
+        for i in range(4):  # centroid moves +x, flow points +x -> coherent
+            results = tracker.update([meas(i * 0.5, 0, 0, vx=1.0, vy=0.0)])
+        assert len(results) == 1
+
+    def test_coherence_gate_rejects_incoherent_flow(self) -> None:
+        params = MOTParams(min_hits=2, max_age=5, gate_distance=5.0, disp_gate=0.3,
+                           min_speed=0.05, max_motion_angle=45.0)
+        tracker = MultiObjectTracker(params)
+        results: list = []
+        for i in range(4):  # centroid moves +x but flow claims +y -> incoherent
+            results = tracker.update([meas(i * 0.5, 0, 0, vx=0.0, vy=1.0)])
+        assert results == []  # rejected despite being confirmed and past disp_gate
 
     def test_velocity_estimation_over_time(self) -> None:
         tracker = MultiObjectTracker(
@@ -257,7 +278,8 @@ class TestTrackLifecycle:
         KalmanBoxTracker.reset_counter()
 
     def test_full_lifecycle(self) -> None:
-        tracker = MultiObjectTracker(MOTParams(min_hits=2, max_age=2, disp_gate=0.0))
+        tracker = MultiObjectTracker(MOTParams(min_hits=2, max_age=2, disp_gate=0.0,
+                                               min_speed=0.0, max_motion_angle=180.0))
         det = meas(0, 0, 0)
 
         assert tracker.update([det]) == []  # birth -> tentative
