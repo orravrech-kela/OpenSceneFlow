@@ -48,6 +48,21 @@ class TestTrackedDetection:
         assert d["age"] == 10 and d["hits"] == 8 and d["time_since_update"] == 0
         assert d["displacement"] == 2.3 and d["num_points"] == 42
 
+    def test_to_cvat_dict_matches_save_results_shape(self) -> None:
+        tracked = TrackedDetection(
+            track_id=7, class_name="mover", score=1.0,
+            x=1.0, y=2.0, z=3.0, dx=0.5, dy=0.6, dz=1.7, heading=0.4,
+            track_state=TrackState.CONFIRMED, age=5, hits=5, time_since_update=0,
+            vx=1.2, vy=-0.3, vz=0.0, displacement=1.1, num_points=30,
+        )
+        d = tracked.to_cvat_dict()
+        assert d["class"] == "mover"
+        assert d["track_id"] == 7 and isinstance(d["track_id"], int)  # int, not str
+        assert d["vel_x"] == 1.2 and d["vel_y"] == -0.3  # flat velocity
+        assert d["track_vel_x"] == 1.2 and d["track_vel_y"] == -0.3
+        assert "velocity" not in d  # not nested
+        assert d["x"] == 1.0 and d["heading"] == 0.4
+
 
 class TestKalmanBoxTracker:
     @pytest.fixture(autouse=True)

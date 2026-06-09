@@ -189,14 +189,14 @@ def _write_outputs(out_dir: Path, per_frame: dict) -> None:
     with (out_dir / "tracks.json").open("w") as f:
         json.dump(summary, f, indent=1)
 
-    # detections.json: each detection is TrackedDetection.to_dict() -- a superset
-    # of the offline_viewer schema (original keys preserved, lifecycle added).
+    # detections.json: lidar inference `save_results` schema (CVAT-import /
+    # offline_viewer ready) -- `class`, int `track_id`, flat velocity + superset.
     results = []
     for rid, (_, dets) in per_frame.items():
         results.append({
             "frame_id": rid,
             "frame_idx": int(rid),
-            "detections": [d.to_dict() for d in dets],
+            "detections": [d.to_cvat_dict() for d in dets],
         })
     with (out_dir / "detections.json").open("w") as f:
         json.dump({"results": results}, f, indent=1)

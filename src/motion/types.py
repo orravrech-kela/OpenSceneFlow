@@ -97,3 +97,32 @@ class TrackedDetection:
             "displacement": self.displacement,
             "num_points": self.num_points,
         }
+
+    def to_cvat_dict(self) -> dict:
+        """detections.json shape matching the lidar inference ``save_results``
+        contract (CVAT-import / offline_viewer ready): ``class`` label, **int**
+        ``track_id``, and flat ``vel_x``/``vel_y`` + ``track_vel_x``/``track_vel_y``.
+        OSF lifecycle fields are kept as a harmless superset."""
+        return {
+            "class": self.class_name,
+            "score": self.score,
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "dx": self.dx,
+            "dy": self.dy,
+            "dz": self.dz,
+            "heading": self.heading,
+            "vel_x": self.vx,
+            "vel_y": self.vy,
+            "track_id": self.track_id,
+            "track_vel_x": self.vx,
+            "track_vel_y": self.vy,
+            # OSF lifecycle extras (superset; ignored by CVAT/viewer)
+            "state": self.track_state.value,
+            "age": self.age,
+            "hits": self.hits,
+            "time_since_update": self.time_since_update,
+            "displacement": self.displacement,
+            "num_points": self.num_points,
+        }
