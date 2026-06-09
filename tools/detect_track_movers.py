@@ -25,9 +25,14 @@ import numpy as np
 PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(PARENT_DIR)
 
-from src.motion.detect import Detection, detect_frame  # noqa: E402
+from src.motion import (  # noqa: E402
+    KalmanTrackerParams,
+    MOTParams,
+    MultiObjectTracker,
+    TrackedDetection,
+    detect_frame,
+)
 from src.motion.loader import list_frame_ids, load_candidates  # noqa: E402
-from src.motion.track import Tracker  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,11 +50,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--min-points", type=int, default=12)
     ap.add_argument("--min-frames", type=int, default=2, help="distinct source frames a cluster must span")
     ap.add_argument("--max-range", type=float, default=120.0)
+    ap.add_argument("--vel-weight", type=float, default=1.0, help="velocity weight in clustering (0 = position-only)")
+    ap.add_argument("--speed-yaw", type=float, default=0.15, help="min |vel_xy| (m/frame) to derive yaw from flow")
     # tracking
     ap.add_argument("--max-dist", type=float, default=2.5)
     ap.add_argument("--min-hits", type=int, default=3)
     ap.add_argument("--max-misses", type=int, default=4)
     ap.add_argument("--disp-gate", type=float, default=0.5, help="net translation (m) before a track is emitted")
+    ap.add_argument("--use-bev-iou", action="store_true", help="associate by BEV-IoU instead of distance")
+    ap.add_argument("--no-flow-meas", action="store_true", help="don't fuse flow velocity as a KF measurement")
     # run
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="0 = all frames")
@@ -79,8 +88,15 @@ def main() -> int:
         xyz, vel, _ = load_candidates(args.seq, args.pred_subdir, rid, args.tau, args.use_snp)
         cands[j] = (xyz, vel)
 
-    per_frame: dict[str, list[Detection]] = {}
-    tracker = Tracker(args.max_dist, args.min_hits, args.max_misses, args.disp_gate)
+    per_frame: dict[str, tuple[int, list[TrackedDetection]]] = {}
+    tracker = MultiObjectTracker(MOTParams(
+        gate_distance=args.max_dist,
+        min_hits=args.min_hits,
+        max_age=args.max_misses,
+        disp_gate=args.disp_gate,
+        use_bev_iou=args.use_bev_iou,
+        kalman_params=KalmanTrackerParams(dt=1.0, use_flow_measurement=not args.no_flow_meas),
+    ))
     n_emitted = 0
     for j in range(args.start, args.start + len(sel)):
         rid = ids[j]
@@ -94,35 +110,42 @@ def main() -> int:
             window, j, rid,
             eps=args.eps, min_samples=args.min_samples, min_points=args.min_points,
             min_frames=args.min_frames, max_range=args.max_range,
+            vel_weight=args.vel_weight, speed_yaw_thresh=args.speed_yaw,
         )
-        emitted = tracker.update(dets)
-        per_frame[rid] = emitted
+        emitted = tracker.update([d.to_measurement() for d in dets])
+        per_frame[rid] = (j, emitted)
         n_emitted += len(emitted)
         if emitted:
-            ids_str = ",".join(f"#{d.track_id}(|v|={np.linalg.norm(d.velocity):.2f})" for d in emitted)
+            ids_str = ",".join(
+                f"#{d.track_id}(|v|={float(np.linalg.norm([d.vx, d.vy, d.vz])):.2f})" for d in emitted
+            )
             print(f"  {rid}: {len(dets)} clusters -> {len(emitted)} tracked [{ids_str}]", flush=True)
 
     write_outputs(out_dir, per_frame)
-    n_tracks = len({d.track_id for ds in per_frame.values() for d in ds})
+    n_tracks = len({d.track_id for _, ds in per_frame.values() for d in ds})
     print(f"[done] {n_emitted} detections across {n_tracks} tracks -> {out_dir}", flush=True)
     return 0
 
 
 def write_outputs(out_dir: Path, per_frame: dict) -> None:
     summary = []
-    for rid, dets in per_frame.items():
+    for rid, (frame_idx, dets) in per_frame.items():
         for d in dets:
             summary.append(dict(
-                raw_id=rid, frame_idx=d.frame_idx, track_id=d.track_id,
-                box=[round(float(v), 4) for v in d.box],
-                velocity=[round(float(v), 4) for v in d.velocity],
-                num_points=int(d.points.shape[0]),
+                raw_id=rid, frame_idx=frame_idx, track_id=d.track_id,
+                box=[round(v, 4) for v in (d.x, d.y, d.z, d.dx, d.dy, d.dz, d.heading)],
+                velocity=[round(v, 4) for v in (d.vx, d.vy, d.vz)],
+                num_points=d.num_points,
+                state=d.track_state.value, age=d.age, hits=d.hits,
+                time_since_update=d.time_since_update, displacement=round(d.displacement, 4),
             ))
         np.savez_compressed(
             out_dir / f"{rid}.npz",
             track_ids=np.array([d.track_id for d in dets], dtype=np.int32),
-            boxes=np.array([d.box for d in dets], dtype=np.float32).reshape(-1, 7),
-            velocities=np.array([d.velocity for d in dets], dtype=np.float32).reshape(-1, 3),
+            boxes=np.array([[d.x, d.y, d.z, d.dx, d.dy, d.dz, d.heading] for d in dets],
+                           dtype=np.float32).reshape(-1, 7),
+            velocities=np.array([[d.vx, d.vy, d.vz] for d in dets],
+                                dtype=np.float32).reshape(-1, 3),
         )
     with (out_dir / "tracks.json").open("w") as f:
         json.dump(summary, f, indent=1)
@@ -131,25 +154,18 @@ def write_outputs(out_dir: Path, per_frame: dict) -> None:
 
 
 def _write_viewer_detections(out_dir: Path, per_frame: dict) -> None:
-    """Write detections.json compatible with offline_viewer.py --detections."""
+    """Write detections.json compatible with offline_viewer.py --detections.
+
+    Each detection is TrackedDetection.to_dict() -- a superset of the viewer
+    schema (original keys preserved, lidar lifecycle fields added).
+    """
     results = []
-    for rid, dets in per_frame.items():
-        frame_dets = []
-        for d in dets:
-            cx, cy, cz, l, w, h, yaw = d.box
-            frame_dets.append({
-                "class_name": "mover",
-                "score": 1.0,
-                "x": round(float(cx), 4),
-                "y": round(float(cy), 4),
-                "z": round(float(cz), 4),
-                "dx": round(float(l), 4),
-                "dy": round(float(w), 4),
-                "dz": round(float(h), 4),
-                "heading": round(float(yaw), 4),
-                "track_id": str(d.track_id),
-            })
-        results.append({"frame_id": rid, "frame_idx": int(rid), "detections": frame_dets})
+    for rid, (_, dets) in per_frame.items():
+        results.append({
+            "frame_id": rid,
+            "frame_idx": int(rid),
+            "detections": [d.to_dict() for d in dets],
+        })
     with (out_dir / "detections.json").open("w") as f:
         json.dump({"results": results}, f, indent=1)
 

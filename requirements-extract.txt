@@ -5,3 +5,8 @@ tqdm
 pyyaml
 fire
 linefit==1.1.0
+# motion detector/tracker (src.motion)
+scikit-learn
+opencv-python-headless
+filterpy>=1.4.5
+pytest
