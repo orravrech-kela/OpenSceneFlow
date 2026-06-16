@@ -216,6 +216,38 @@ class BucketResultMatrix:
         range = self.range_storage_matrix[class_idx, :]
         count = self.count_storage_matrix[class_idx, :]
         return epe, range, count
+
+    def all_reduce_(self):
+        """Sum-merge this rank's matrix with every other rank's, so all ranks
+        end up with identical state. Required before logging via Lightning's
+        sync_dist=True: when each rank only emits keys for buckets it has
+        actually seen, the per-rank key sets differ, the per-key all-reduces
+        no longer line up across ranks, and validation_epoch_end deadlocks."""
+        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
+            return
+        # NCCL all-reduce wants CUDA tensors; gloo (CPU DDP) wants CPU tensors.
+        # Pick by availability so this also runs under a CPU process group.
+        device = (torch.device('cuda', torch.cuda.current_device())
+                  if torch.cuda.is_available() else torch.device('cpu'))
+        epe = torch.nan_to_num(torch.as_tensor(self.epe_storage_matrix,
+                                               dtype=torch.float64, device=device), nan=0.0)
+        rng = torch.nan_to_num(torch.as_tensor(self.range_storage_matrix,
+                                               dtype=torch.float64, device=device), nan=0.0)
+        cnt = torch.as_tensor(self.count_storage_matrix, dtype=torch.float64, device=device)
+        # Convert per-cell averages back to weighted sums, all-reduce, divide.
+        epe_weighted = epe * cnt
+        rng_weighted = rng * cnt
+        torch.distributed.all_reduce(epe_weighted, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(rng_weighted, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(cnt, op=torch.distributed.ReduceOp.SUM)
+        cnt_safe = cnt.clamp(min=1.0)
+        epe_global = torch.where(cnt > 0, epe_weighted / cnt_safe,
+                                 torch.full_like(epe_weighted, float('nan')))
+        rng_global = torch.where(cnt > 0, rng_weighted / cnt_safe,
+                                 torch.full_like(rng_weighted, float('nan')))
+        self.epe_storage_matrix = epe_global.cpu().numpy()
+        self.range_storage_matrix = rng_global.cpu().numpy()
+        self.count_storage_matrix = cnt.cpu().numpy().astype(np.int64)
     
     def get_normalized_error_matrix(self):
         pass
@@ -355,6 +387,29 @@ class OfficialMetrics:
                     item_.avg_range,
                     item_.count,
                 )
+    def all_reduce_(self):
+        """Make every rank see identical accumulated state before normalize/log.
+        Lightning's sync_dist=True logs deadlock when different ranks emit
+        different key sets (which happens when each rank only saw a subset
+        of the val data). Syncing the underlying matrices + epe_3way lists
+        guarantees per-rank logging emits the same keys."""
+        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
+            return
+        self.bucketedMatrix.all_reduce_()
+        self.innovizMatrix.all_reduce_()
+        # epe_3way is a dict of per-step EPE lists. All-gather the lists so
+        # every rank has the union; subsequent np.mean is then identical
+        # everywhere.
+        world_size = torch.distributed.get_world_size()
+        for key in self.epe_3way:
+            local = list(self.epe_3way[key])
+            gathered = [None] * world_size
+            torch.distributed.all_gather_object(gathered, local)
+            merged = []
+            for chunk in gathered:
+                merged.extend(chunk)
+            self.epe_3way[key] = merged
+
     def normalize(self):
         """
         This normalize mean average results between **frame and frame**.

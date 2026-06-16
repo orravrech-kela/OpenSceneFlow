@@ -299,18 +299,24 @@ curl -X POST https://sceneflow.argoverse.org/submissions/upload \\
             print(f"\nModel: {self.model.__class__.__name__}, Checkpoint from: {self.checkpoint}")
             print(f"More details parameters and training status are in checkpoints file.")        
 
+        # Reduce raw matrix/list state across ranks before generating any
+        # logged keys — otherwise different ranks emit different key sets,
+        # each `sync_dist=True` log queues a per-key all-reduce, the per-rank
+        # collective counts diverge, and validation_epoch_end deadlocks.
+        self.metrics.all_reduce_()
         self.metrics.normalize()
 
-        # wandb log things:
+        # State is now identical on every rank, so per-key sync_dist is a
+        # no-op (and risky if any rank dropped a key) — log locally.
         if self.eval_metric in ('av2', 'both'):
             for key in self.metrics.bucketed:
                 for type_ in 'Static', 'Dynamic':
-                    self.log(f"val/{type_}/{key}", self.metrics.bucketed[key][type_], sync_dist=True)
+                    self.log(f"val/{type_}/{key}", self.metrics.bucketed[key][type_], sync_dist=False)
             for key in self.metrics.epe_3way:
-                self.log(f"val/{key}", self.metrics.epe_3way[key], sync_dist=True)
+                self.log(f"val/{key}", self.metrics.epe_3way[key], sync_dist=False)
         if self.eval_metric in ('innoviz', 'both'):
             for key, val in self.metrics.innoviz_log_dict().items():
-                self.log(f"val/{key}", val, sync_dist=True)
+                self.log(f"val/{key}", val, sync_dist=False)
 
         self.metrics.print()
 

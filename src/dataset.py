@@ -50,6 +50,13 @@ MIN_FRAME_NON_GROUND_VOXELS = 2
 
 def _frame_passes(pc, gm, point_cloud_range=None, voxel_size=None):
     """Check whether one frame's non-ground in-range points clear the BN-safety floor."""
+    # Accept either numpy or torch — callers include the viz callback, which
+    # temporarily drops ds.transform (to grab raw PRE-aug samples) and then
+    # re-enters __getitem__ on numpy data.
+    if isinstance(pc, np.ndarray):
+        pc = torch.from_numpy(pc)
+    if isinstance(gm, np.ndarray):
+        gm = torch.from_numpy(gm)
     nonground = pc[~gm]
     if point_cloud_range is not None and nonground.numel() > 0:
         x_min, y_min, z_min, x_max, y_max, z_max = point_cloud_range
@@ -249,7 +256,8 @@ class HDF5Dataset(Dataset):
     def __init__(self, directory, \
                 transform=None, n_frames=2, ssl_label=None, \
                 eval = False, leaderboard_version=1, \
-                vis_name='', index_flow=False):
+                vis_name='', index_flow=False, \
+                point_cloud_range=None, voxel_size=None):
         '''
         Args:
             directory: the directory of the dataset, the folder should contain some .h5 file and index_total.pkl.
@@ -265,6 +273,11 @@ class HDF5Dataset(Dataset):
         '''
         super(HDF5Dataset, self).__init__()
         self.directory = directory
+        # BN-safety filter inputs; when set, __getitem__ retries past samples
+        # that would later be dropped by collate_fn_pad, so a fully-empty
+        # batch (which would force a step-skip — illegal in DDP) cannot occur.
+        self._filter_point_cloud_range = point_cloud_range
+        self._filter_voxel_size = voxel_size
         if (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or not torch.distributed.is_initialized():
             print(f"----[Debug] Loading data with num_frames={n_frames}, ssl_label={ssl_label}, eval={eval}, leaderboard_version={leaderboard_version}")
         with open(os.path.join(self.directory, 'index_total.pkl'), 'rb') as f:
@@ -368,6 +381,22 @@ class HDF5Dataset(Dataset):
         return eval_flag, index_
     
     def __getitem__(self, index_):
+        # Retry past samples that would later be dropped by collate_fn_pad's
+        # BN-safety filter, so the collate never returns an empty batch (which
+        # would force a step-skip — Lightning forbids skipping in DDP).
+        if self._filter_point_cloud_range is None and self._filter_voxel_size is None:
+            return self._read_sample(index_)
+        n = len(self)
+        for offset in range(n):
+            sample = self._read_sample((index_ + offset) % n)
+            if _sample_is_usable(sample,
+                                 point_cloud_range=self._filter_point_cloud_range,
+                                 voxel_size=self._filter_voxel_size):
+                return sample
+        # All samples failed the filter — let the caller see the original.
+        return self._read_sample(index_)
+
+    def _read_sample(self, index_):
         eval_flag, index_ = self.valid_index(index_)
         scene_id, timestamp = self.data_index[index_]
 

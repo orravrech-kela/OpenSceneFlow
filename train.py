@@ -60,10 +60,12 @@ def main(cfg):
     pl.seed_everything(cfg.seed, workers=True)
 
     train_aug = transforms.Compose([RandomHeight(p=0.8), RandomFlip(px=cfg.get('aug_flip_x_prob', 0.0), py=cfg.get('aug_flip_y_prob', 0.2)), RandomJitter(), ToTensor()] if cfg.get('train_aug', False) else [ToTensor()])
-    train_dataset = HDF5Dataset(cfg.train_data, 
+    train_dataset = HDF5Dataset(cfg.train_data,
                     n_frames=cfg.num_frames,
                     ssl_label=cfg.get('ssl_label', None),
-                    transform=train_aug)
+                    transform=train_aug,
+                    point_cloud_range=list(cfg.point_cloud_range),
+                    voxel_size=list(cfg.voxel_size))
     collate = partial(collate_fn_pad,
                       point_cloud_range=list(cfg.point_cloud_range),
                       voxel_size=list(cfg.voxel_size))
@@ -75,7 +77,9 @@ def main(cfg):
                               pin_memory=True)
     val_loader = DataLoader(HDF5Dataset(cfg.val_data, \
                                 n_frames=cfg.num_frames,\
-                                transform=transforms.Compose([ToTensor()])),
+                                transform=transforms.Compose([ToTensor()]),\
+                                point_cloud_range=list(cfg.point_cloud_range),\
+                                voxel_size=list(cfg.voxel_size)),
                             batch_size=cfg.batch_size,
                             shuffle=False,
                             num_workers=cfg.num_workers,
@@ -132,7 +136,10 @@ def main(cfg):
                             name=f"{cfg.output}",
                             offline=(cfg.wandb_mode == "offline"),
                             log_model=(cfg.wandb_log_model and cfg.wandb_mode == "online"))
-        logger.watch(model, log_graph=False)
+        # logger.watch deadlocks DDP backward on some wandb/lightning combos —
+        # disabled while diagnosing the multi-GPU hang.
+        if cfg.gpus == 1:
+            logger.watch(model, log_graph=False)
     else:
         # check local tensorboard logging: tensorboard --logdir logs/jobs/{log folder}
         logger = TensorBoardLogger(save_dir=output_dir, name="logs")
