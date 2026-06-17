@@ -8,12 +8,14 @@ test drop transient single-frame noise. Sensor is static so no warping is needed
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
+
+from src.motion.types import Measurement
 
 BOX_LINES = [
     [0, 1], [1, 2], [2, 3], [3, 0],
@@ -40,17 +42,62 @@ class Detection:
         top = np.column_stack([c, np.full(4, self.z_hi)])
         return np.vstack([top, bottom])
 
+    def to_measurement(self) -> Measurement:
+        """Lean tracker input (class-agnostic 'mover'); carries flow velocity."""
+        cx, cy, cz, l, w, h, yaw = self.box
+        return Measurement(
+            class_name="mover", score=1.0,
+            x=float(cx), y=float(cy), z=float(cz),
+            dx=float(l), dy=float(w), dz=float(h), heading=float(yaw),
+            vx=float(self.velocity[0]), vy=float(self.velocity[1]), vz=float(self.velocity[2]),
+            num_points=int(self.points.shape[0]),
+        )
 
-def fit_box(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float]:
-    """Oriented BEV box from points. Returns (box7, bev_corners, z_lo, z_hi)."""
-    xy = np.ascontiguousarray(pts[:, :2], dtype=np.float32)
-    (cx, cy), (a, b), ang = cv2.minAreaRect(xy)
-    corners = cv2.boxPoints(((cx, cy), (a, b), ang)).astype(np.float64)
-    z_lo, z_hi = (float(v) for v in np.percentile(pts[:, 2], [5, 95]))
+
+def fit_box(
+    pts: np.ndarray,
+    vel: Optional[np.ndarray] = None,
+    speed_yaw_thresh: float = 0.15,
+    extent_pct: float = 2.0,
+) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """Oriented BEV box from points. Returns (box7, bev_corners, z_lo, z_hi).
+
+    When the cluster is clearly moving (|vel_xy| >= speed_yaw_thresh) the heading is
+    taken from the flow direction and length/width are measured as percentile-
+    trimmed extents *along that heading* -- a tight, orientation-consistent,
+    outlier-resistant box (unlike minAreaRect, which encloses every stray point and
+    whose axes need not align with travel). Otherwise size/orientation come from
+    minAreaRect. extent_pct (%) is trimmed off each end when measuring extents.
+    """
+    xy = np.ascontiguousarray(pts[:, :2], dtype=np.float64)
+    lo_pct, hi_pct = extent_pct, 100.0 - extent_pct
+    z_lo, z_hi = (float(v) for v in np.percentile(pts[:, 2], [lo_pct, hi_pct]))
     cz = 0.5 * (z_lo + z_hi)
     h = max(z_hi - z_lo, 0.1)
-    l, w = max(a, b), min(a, b)
-    yaw = np.deg2rad(ang if a >= b else ang + 90.0)
+
+    if vel is not None and float(np.hypot(vel[0], vel[1])) >= speed_yaw_thresh:
+        yaw = float(np.arctan2(vel[1], vel[0]))
+        u = np.array([np.cos(yaw), np.sin(yaw)])    # along heading
+        v = np.array([-np.sin(yaw), np.cos(yaw)])   # cross heading
+        pu, pv = xy @ u, xy @ v
+        lo_u, hi_u = np.percentile(pu, [lo_pct, hi_pct])
+        lo_v, hi_v = np.percentile(pv, [lo_pct, hi_pct])
+        l, w = hi_u - lo_u, hi_v - lo_v
+        center = 0.5 * (lo_u + hi_u) * u + 0.5 * (lo_v + hi_v) * v
+        cx, cy = float(center[0]), float(center[1])
+        hl, hw = l / 2.0, w / 2.0
+        corners = np.array([
+            center + hl * u + hw * v,
+            center + hl * u - hw * v,
+            center - hl * u - hw * v,
+            center - hl * u + hw * v,
+        ], dtype=np.float64)
+    else:
+        (cx, cy), (a, b), ang = cv2.minAreaRect(xy.astype(np.float32))
+        corners = cv2.boxPoints(((cx, cy), (a, b), ang)).astype(np.float64)
+        l, w = max(a, b), min(a, b)
+        yaw = np.deg2rad(ang if a >= b else ang + 90.0)
+
     box = np.array([cx, cy, cz, max(l, 0.1), max(w, 0.1), h, yaw], dtype=np.float64)
     return box, corners, z_lo, z_hi
 
@@ -64,28 +111,51 @@ def detect_frame(
     min_points: int = 12,
     min_frames: int = 2,
     max_range: float = 120.0,
+    vel_weight: float = 1.0,
+    speed_yaw_thresh: float = 0.15,
+    min_box_points: int = 6,
+    min_current_points: int = 2,
 ) -> List[Detection]:
-    """window: list of (offset, xyz, vel) where offset = neighbor_idx - frame_idx."""
-    pos, vel_list, frm = [], [], []
-    for off, xyz, vel in window:
-        if xyz.shape[0] == 0:
-            continue
-        pos.append(xyz - off * vel)   # de-translate neighbor to target frame
-        vel_list.append(vel)
-        frm.append(np.full(xyz.shape[0], off, dtype=np.int32))
-    if not pos:
+    """window: list of (offset, xyz, vel) where offset = neighbor_idx - frame_idx.
+
+    vel_weight scales the per-point flow into the clustering feature space so
+    adjacent objects moving differently split into separate clusters: a velocity
+    difference of 1/vel_weight (m/frame) separates points at the same location.
+    vel_weight=0 reproduces position-only DBSCAN.
+
+    min_current_points requires a cluster to have at least this many points at the
+    target frame (offset 0) to be emitted -- it rejects pure temporal smear from
+    objects only present in past/future window frames (which otherwise produce
+    boxes ~window frames before an object arrives and after it leaves). 0 disables.
+    """
+    chunks = [(off, xyz, vel) for off, xyz, vel in window if xyz.shape[0] > 0]
+    if not chunks:
         return []
-    P = np.concatenate(pos)
-    V = np.concatenate(vel_list)
-    F = np.concatenate(frm)
+
+    # De-translate neighbors to the target frame and pool, pre-allocating once.
+    total = sum(xyz.shape[0] for _, xyz, _ in chunks)
+    P = np.empty((total, 3), dtype=np.float64)
+    V = np.empty((total, 3), dtype=np.float64)
+    F = np.empty(total, dtype=np.int32)
+    i = 0
+    for off, xyz, vel in chunks:
+        n = xyz.shape[0]
+        P[i:i + n] = xyz - off * vel
+        V[i:i + n] = vel
+        F[i:i + n] = off
+        i += n
 
     if max_range:
-        keep = np.linalg.norm(P, axis=1) <= max_range
+        keep = (P ** 2).sum(axis=1) <= max_range * max_range
         P, V, F = P[keep], V[keep], F[keep]
     if P.shape[0] < min_points:
         return []
 
-    labels = DBSCAN(eps=eps, min_samples=min_samples).fit(P).labels_
+    if vel_weight > 0.0:
+        feat = np.concatenate([P, (vel_weight * eps) * V], axis=1)
+    else:
+        feat = P
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit(feat).labels_
     n_window = max(1, len({off for off, _, _ in window}))
     min_frames_eff = min(min_frames, n_window)
 
@@ -98,14 +168,23 @@ def detect_frame(
             continue
         if np.unique(F[m]).size < min_frames_eff:
             continue
+        cur = F[m] == 0
+        # Require the object to actually be present at the target frame (not pure
+        # past/future smear).
+        if int(cur.sum()) < min_current_points:
+            continue
         pts = P[m]
-        box, corners, z_lo, z_hi = fit_box(pts)
+        vel_med = np.median(V[m], axis=0)
+        # Size the box from current-frame members only (offset 0, un-de-translated)
+        # to avoid flow-smear; the pooled window is for finding/velocity/persistence.
+        pts_box = pts[cur] if int(cur.sum()) >= min_box_points else pts
+        box, corners, z_lo, z_hi = fit_box(pts_box, vel=vel_med, speed_yaw_thresh=speed_yaw_thresh)
         dets.append(
             Detection(
                 frame_idx=frame_idx,
                 raw_id=raw_id,
                 box=box,
-                velocity=np.median(V[m], axis=0),
+                velocity=vel_med,
                 bev_corners=corners,
                 z_lo=z_lo,
                 z_hi=z_hi,
